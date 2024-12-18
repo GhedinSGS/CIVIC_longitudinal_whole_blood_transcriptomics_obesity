@@ -1,0 +1,654 @@
+---
+title: "Figure 3: Differential Expression: Vaccine response and BMI over time"
+output: html_notebook
+---
+
+```{r}
+library(DESeq2)
+library(dplyr)
+library(biomaRt)
+library(DEGreport)
+library(ggplot2)
+library(clusterProfiler)
+library(ggpubr)
+library(UpSetR)
+library(cowplot)
+library(tidyr)
+library(ComplexHeatmap)
+library(paletteer)
+library(ggpmisc)
+library(NatParksPalettes)
+library(purrr)
+```
+
+# Set working directory
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "/Users/hockmanmr/OneDrive - National Institutes of Health/LAB_STUFF/PEOPLE/meg/manuscripts/CIVIC Longitudinal Transcriptomics")
+```
+
+# Step 1: Import Data
+Remember to set the appropriate working directory. The .RData file here was generated using "Data Wrangling" and "Preprocessing Scripts" which
+are available.
+```{r}
+load("./Scripts/Data/Publication/Longitudinal_complete_data.RData")
+colfunc <- colorRampPalette(c("#832424", "white", "#3A3A98"))
+```
+
+## Set up Metadata
+* Set "Day" as a factor - I want DESeq to consider nonlinear patterns in expression
+* Add a bivariate, categorical classification for BMI, and make it a factor
+* Set a categorical classifier for serology, grouping patients by their seroconversion values
+* Set metadata rownames for downstream analyses
+* Center BMI, seroconversion score, and age for DESeq
+* Generate a table of different gene identifiers
+```{r}
+#Set up a few variables
+UGA4_longitudinal_metadata$Day <- factor(UGA4_longitudinal_metadata$Day)
+
+UGA4_longitudinal_metadata$BMI_Bivariate <- ifelse(UGA4_longitudinal_metadata$BMI < 30, "Non Obese",
+                                                   "Obese")
+UGA4_longitudinal_metadata$BMI_Bivariate <- factor(UGA4_longitudinal_metadata$BMI_Bivariate, levels = c("Non Obese", "Obese"))
+
+UGA4_longitudinal_metadata$Serology <- ifelse(UGA4_longitudinal_metadata$vax_strain_seroconversion <= 2,
+                                                          "Non Responder", ifelse(UGA4_longitudinal_metadata$vax_strain_seroconversion < 4,
+                                                          "Low Responder", "High Responder"))
+UGA4_longitudinal_metadata$Serology <- factor(UGA4_longitudinal_metadata$Serology, levels = c("Non Responder", "Low Responder", "High Responder"))
+
+#Set up rownames
+rownames(UGA4_longitudinal_metadata) <- paste0(UGA4_longitudinal_metadata$ID, "_", UGA4_longitudinal_metadata$Day)
+
+#Center data, because DESeq throws a warning when it's not 
+UGA4_longitudinal_metadata$BMI_centered <- scale(UGA4_longitudinal_metadata$BMI, center = TRUE)
+UGA4_longitudinal_metadata$seroconversion_centered <- scale(UGA4_longitudinal_metadata$vax_strain_seroconversion, center = TRUE)
+UGA4_longitudinal_metadata$Age_centered <- scale(UGA4_longitudinal_metadata$Age, center = TRUE)
+
+#Generate a table of gene names for different applications (human-readable)
+mart <- useEnsembl(biomart = "ensembl", "hsapiens_gene_ensembl")#, mirror = "useast")
+geneids <- rownames(UGA4_longitudinal_counts_hemo_removed)
+genenames <- as.data.frame(getBM(filters = "ensembl_gene_id",
+                                 attributes = c("ensembl_gene_id", "hgnc_symbol", "entrezgene_id"),
+                                 values = geneids,
+                                 mart = mart))
+```
+
+
+## Set deseq import function
+* Makes a function to make deseq objects from data, checks to make sure that the count colnames are equal to the metadata rownames, a requirement for deseq. Designed to be flexible when considering single day or multi-day data.
+```{r}
+deseq_import <- function(counts, metadata, design_setting = ~1) {
+  ifelse(length(unique(metadata$Day)) > 1,
+  rownames(metadata) <- paste0(metadata$ID, "_", metadata$Day),
+  rownames(metadata) <- metadata$ID)
+
+  if (all(rownames(metadata) == colnames(counts))) {
+    object <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(counts)),
+      colData = metadata,
+      design = design_setting)} else {
+    "names not equal"
+  }
+  return(object)
+}
+```
+
+# Split the data into obese and non-obese groups
+* Make tables for analysis within BMI groups (Obese and non-obese, omitting overweight for this analysis)
+```{r}
+obese_metadata <- UGA4_longitudinal_metadata %>% filter(BMI_Bivariate == "Obese") %>% filter(Serology %in% c("High Responder", "Non Responder"))
+nonobese_metadata <- UGA4_longitudinal_metadata %>% filter(BMI_Bivariate == "Non Obese") %>% filter(Serology %in% c("High Responder", "Non Responder"))
+
+obese_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(obese_metadata)]
+nonobese_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(nonobese_metadata)]
+
+obese_tpm <- UGA4_longitudinal_tpm_hemo_removed[colnames(UGA4_longitudinal_tpm_hemo_removed) %in% rownames(obese_metadata)]
+nonobese_tpm <- UGA4_longitudinal_tpm_hemo_removed[colnames(UGA4_longitudinal_tpm_hemo_removed) %in% rownames(nonobese_metadata)]
+```
+
+# Overall Model: Differential expression over time in Obese or Non-Obese, with serology as a covariate
+* Performs differential expression analysis with respect to time (Day) and response as a categorical variable (Serology)
+* Keep only rows that have a count of at least 10 in the smallest group considered.
+* Perform a likelihood ratio test, removing the interaction of time and response, and also perform analysis using the full model (High vs. Non Responders). Applies lfcshrink in this case.
+* Pull out differentially expressed genes
+```{r}
+time_serology_model <- ~ Day + Serology + Gender + Day:Serology + Age_centered
+time_serology_model_reduced <- ~ Day + Gender + Serology + Age_centered
+
+groupsizes_obese <- c(nrow(obese_metadata %>% filter(Day == 0) %>% filter(Serology %in% "Non Responder")), nrow(obese_metadata %>% filter(Day == 0) %>% filter(Serology %in% "High Responder")))
+groupsizes_nonobese <- c(nrow(nonobese_metadata %>% filter(Day == 0) %>% filter(Serology %in% "Non Responder")), nrow(nonobese_metadata %>% filter(Day == 0) %>% filter(Serology %in% "High Responder")))
+
+dds_time_serology_obese <- deseq_import(obese_counts, obese_metadata, design_setting = time_serology_model)
+dds_time_serology_nonobese <- deseq_import(nonobese_counts, nonobese_metadata, design_setting = time_serology_model)
+
+dds_time_serology_obese <- estimateSizeFactors(dds_time_serology_obese)
+idx_obese <- rowSums(counts(dds_time_serology_obese, normalized = TRUE) >= 10) >= min(groupsizes_obese)
+dds_time_serology_obese <- dds_time_serology_obese[idx_obese, ]
+
+dds_time_serology_nonobese <- estimateSizeFactors(dds_time_serology_nonobese)
+idx_nonobese <- rowSums(counts(dds_time_serology_nonobese, normalized = TRUE) >= 10) >= min(groupsizes_nonobese)
+dds_time_serology_nonobese <- dds_time_serology_nonobese[idx_nonobese, ]
+
+dds_LRT_time_serology_obese <- DESeq(dds_time_serology_obese, test = "LRT", reduced = time_serology_model_reduced)
+#1 of the genes does not fully converge, this line will remove that gene
+dds_LRT_time_serology_obese <- dds_LRT_time_serology_obese[which(mcols(dds_LRT_time_serology_obese)$fullBetaConv),]
+res_LRT_obese <- results(dds_LRT_time_serology_obese)
+
+dds_LRT_time_serology_nonobese <- DESeq(dds_time_serology_nonobese, test = "LRT", reduced = time_serology_model_reduced)
+res_LRT_nonobese <- results(dds_LRT_time_serology_nonobese)
+
+dds_fullmodel_time_serology_obese <- DESeq(dds_time_serology_obese)
+dds_fullmodel_time_serology_obese <- dds_fullmodel_time_serology_obese[which(mcols(dds_fullmodel_time_serology_obese)$betaConv),]
+res_fullmodel_obese <- lfcShrink(dds_fullmodel_time_serology_obese, coef = "Serology_High.Responder_vs_Non.Responder")
+
+dds_fullmodel_time_serology_nonobese <- DESeq(dds_time_serology_nonobese)
+res_fullmodel_nonobese <- lfcShrink(dds_fullmodel_time_serology_nonobese, coef = "Serology_High.Responder_vs_Non.Responder")
+
+sig_LRT_obese <- res_LRT_obese %>%
+  data.frame() %>%
+  tibble::rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  filter(padj < 0.05) %>%
+  mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_fullmodel_obese <- res_fullmodel_obese %>%
+  data.frame() %>%
+  tibble::rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  filter(padj < 0.05) %>%
+  mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_LRT_nonobese <- res_LRT_nonobese %>%
+  data.frame() %>%
+  tibble::rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  filter(padj < 0.05) %>%
+  mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_fullmodel_nonobese <- res_fullmodel_nonobese %>%
+  data.frame() %>%
+  tibble::rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  filter(padj < 0.05) %>%
+  mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+```
+
+# Export differentially expressed genes
+* Combine all tables of DEGenes into one and export for supplement
+```{r}
+allgenes <- rbind(sig_fullmodel_obese %>% mutate(Model = "NoTime/Obese", stat = NA),
+                  sig_fullmodel_nonobese %>% mutate(Model = "NoTime/Nonobese", stat = NA),
+                  sig_LRT_obese %>% mutate(Model = "LRT/Obese"),
+                  sig_LRT_nonobese %>% mutate(Model = "LRT/Nonobese"))
+
+write.csv(allgenes, "./Scripts/Supplement/Supplemental_Table_4.csv")
+```
+
+
+# Figure 3C: Perform DEGPatterns analysis
+* Normalizes genes in both obese and non-obese groups
+* Focuses DEGPatterns on obese genes, looking for patterns, but can be adatped for non-obese, too
+* Plots these genes and their patterns in both weight groups
+```{r}
+ntd_obese_fullmodel <- normTransform(dds_fullmodel_time_serology_obese)[sig_fullmodel_obese$gene]
+ntd_nonobese_fullmodel <- normTransform(dds_fullmodel_time_serology_nonobese)[sig_fullmodel_obese$gene]
+
+norm_count_data_obese <- as.matrix(assay(ntd_obese_fullmodel))
+
+clusters_time_continuous <- degPatterns(norm_count_data_obese,
+                             metadata = obese_metadata,
+                             time = "Day",
+                             col = "Serology",
+                             reduce = TRUE,
+                             minc = 10)
+
+all_clusters_time_response_continuous <- split(clusters_time_continuous[[1]], sort(as.numeric(clusters_time_continuous[[1]]$cluster)))
+
+plot_df_long_continuous <- list()
+
+for(i in 1:length(all_clusters_time_response_continuous)){
+  plot_df_obese <- data.frame(scale(t(assay(ntd_obese_fullmodel)[rownames(assay(ntd_obese_fullmodel)) %in% all_clusters_time_response_continuous[[i]]$gene, ]))) %>%
+    mutate(Serology = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
+    mutate(Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
+    mutate(BMI = "Obese")
+  
+    plot_df_nonobese <- data.frame(scale(t(assay(ntd_nonobese_fullmodel)[rownames(assay(ntd_nonobese_fullmodel)) %in% all_clusters_time_response_continuous[[i]]$gene, ]))) %>%
+    mutate(Serology = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
+    mutate(Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
+    mutate(BMI = "Non Obese")
+    
+    plot_df <- rbind(plot_df_obese, plot_df_nonobese)
+
+  plot_df_long_continuous[[i]] <- pivot_longer(plot_df, cols = 1:(ncol(plot_df) - 3)) %>%
+    group_by(name, Day, Serology, BMI) %>%
+    mutate(mean = mean(value)) %>%
+    filter(row_number() == 1) %>%
+    mutate(Symbol = genenames$hgnc_symbol[match(name, genenames$ensembl_gene_id)]) %>%
+    mutate(Cluster = paste0("Cluster ", i, ": ", length(all_clusters_time_response_continuous[[i]]$gene), " genes"))
+}
+
+plot_list_grouped <- list()
+for(i in 1:length(plot_df_long_continuous)){
+    plot_list_grouped[[i]] <- ggplot(data = plot_df_long_continuous[[i]], aes(x = Day, y = mean, color = Serology)) +
+    geom_boxplot() +
+      geom_point(position = position_jitterdodge()) +
+      scale_color_manual(values = c("#601A4A", "#63ACBE"), name = "Response Group") + 
+    #scale_color_paletteer_d("nationalparkcolors::SmokyMountains", name = "Vaccine\nResponse") +
+    #paletteer::scale_fill_paletteer_c("ggthemes::Red-Green-Gold Diverging", name = "Normalized\nExpression", limits = c(-1.5, 1.5)) +
+    labs(y = "Mean Z-Score", title = plot_df_long_continuous[[i]]$Cluster) +
+    facet_wrap(~BMI) +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        axis.title = element_text(size = 20),
+        strip.text = element_text(size = 17),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 15),
+        aspect.ratio = 1,
+        strip.background = element_blank(),
+        plot.title = element_text(hjust = 0.5, size = 20, face = "bold"))
+}
+
+png("./Figures/Fig3/Fig3B_cluster1.png", height = 1250, width = 3000, res = 300, units = "px")
+plot_list_grouped[[1]]
+dev.off()
+
+pdf("./Figures/Fig3/Fig3B_cluster1.pdf")
+plot_list_grouped[[1]]
+dev.off()
+```
+
+# Figures 3A and 3B: Tile plots of gene expression over time
+* Pull genes that are DE over time in obese and non-obese groups
+* Generate tables of scaled TPM vales, and plot them by weight group
+```{r}
+allgenes <- c(sig_LRT_obese$gene, sig_LRT_nonobese$gene)
+obese_subj <- rownames(UGA4_longitudinal_metadata %>% filter(BMI_Bivariate == "Obese") %>% filter(Serology %in% c("High Responder", "Non Responder")))
+nonobese_subj <- rownames(UGA4_longitudinal_metadata %>% filter(BMI_Bivariate == "Non Obese") %>% filter(Serology %in% c("High Responder", "Non Responder")))
+
+allgenes_tpm_df <- t(UGA4_longitudinal_tpm_hemo_removed[rownames(UGA4_longitudinal_tpm_hemo_removed) %in% allgenes, ])
+allgenes_tpm_df <- data.frame(scale(allgenes_tpm_df, center = TRUE, scale = TRUE))
+allgenes_tpm_df$BMI <- UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(allgenes_tpm_df), rownames(UGA4_longitudinal_metadata))]
+allgenes_tpm_df$Serology <- UGA4_longitudinal_metadata$Serology[match(rownames(allgenes_tpm_df), rownames(UGA4_longitudinal_metadata))]
+allgenes_tpm_df$Day <- UGA4_longitudinal_metadata$Day[match(rownames(allgenes_tpm_df), rownames(UGA4_longitudinal_metadata))]
+allgenes_tpm_df <- pivot_longer(allgenes_tpm_df, cols = starts_with("ENSG"), names_to = "gene")
+allgenes_tpm_df$Name <- genenames$hgnc_symbol[match(allgenes_tpm_df$gene, genenames$ensembl_gene_id)]
+
+
+meandata <- allgenes_tpm_df %>% group_by(BMI, Serology, Day, gene, Name) %>% summarise(mean_expr = mean(value))
+meandata$group <- ifelse(meandata$gene %in% sig_LRT_obese$gene & meandata$gene %in% sig_LRT_nonobese$gene, "Both",
+                                ifelse(meandata$gene %in% sig_LRT_obese$gene, "Obese",
+                                       ifelse(meandata$gene %in% sig_LRT_nonobese$gene, "Non Obese", "try again")))
+
+obese_genes <- meandata %>% filter(group %in% c("Obese", "Both")) %>% filter(BMI == "Obese") %>% filter(Serology %in% c("High Responder", "Non Responder"))
+nonobese_genes <- meandata %>% filter(group %in% c("Non Obese", "Both")) %>% filter(BMI == "Non Obese") %>% filter(Serology %in% c("High Responder", "Non Responder"))
+
+png("./Figures/Fig3/Fig3A_heatmap_obese.png", height = 5000, width = 3300, res = 300, units = "px")
+ggplot(data = obese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
+  geom_tile() + 
+    scale_fill_gradient2(limits = c(-2, 2), name = "Mean\nZ-Score") +
+    facet_grid(group ~ Serology, scales = "free") +
+  theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 18),
+          axis.text.y = element_text(size = 20),
+          axis.title = element_text(face = "bold", size = 20),
+          strip.text = element_text(size = 20, face = "bold"),
+          legend.text = element_text(size = 15),
+          legend.title = element_text(size = 20))
+dev.off()
+
+png("./Figures/Fig3/Fig3A_heatmap_nonobese.png", height = 5000, width = 3300, res = 300, units = "px")
+ggplot(data = nonobese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
+  geom_tile() + 
+    scale_fill_gradient2(limits = c(-2, 2), name = "Mean\nZ-Score") +
+    facet_grid(group ~ Serology, scales = "free") +
+  theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 18),
+          axis.text.y = element_text(size = 20),
+          axis.title = element_text(face = "bold", size = 20),
+          strip.text = element_text(size = 20, face = "bold"),
+          legend.text = element_text(size = 15),
+          legend.title = element_text(size = 20))
+dev.off()
+
+pdf("./Figures/Fig3/Fig3A_heatmap_obese.pdf", width = 10, height = 15)
+ggplot(data = obese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
+  geom_tile() + 
+    scale_fill_gradient2(limits = c(-2, 2), name = "Mean\nZ-Score") +
+    facet_grid(group ~ Serology, scales = "free") +
+  theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 18),
+          axis.text.y = element_text(size = 20),
+          axis.title = element_text(face = "bold", size = 20),
+          strip.text = element_text(size = 20, face = "bold"),
+          legend.text = element_text(size = 15),
+          legend.title = element_text(size = 20))
+dev.off()
+
+pdf("./Figures/Fig3/Fig3A_heatmap_nonobese.pdf", width = 10, height = 15)
+ggplot(data = nonobese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
+  geom_tile() + 
+    scale_fill_gradient2(limits = c(-2, 2), name = "Mean\nZ-Score") +
+    facet_grid(group ~ Serology, scales = "free") +
+  theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 18),
+          axis.text.y = element_text(size = 20),
+          axis.title = element_text(face = "bold", size = 20),
+          strip.text = element_text(size = 20, face = "bold"),
+          legend.text = element_text(size = 15),
+          legend.title = element_text(size = 20))
+dev.off()
+```
+
+# Cluster Enrichment
+```{r}
+genes_cluster1 <- genenames$entrezgene_id[match(all_clusters_time_response_continuous[[1]]$genes, genenames$ensembl_gene_id)]
+
+genes_cluster1_ensembl <- all_clusters_time_response_continuous[[1]]$genes
+
+enriched_cluster1 <- enrichPathway(genes_cluster1,
+      organism = "human",
+      pvalueCutoff = 0.05,
+      pAdjustMethod = "BH")@result
+
+go_cluster1 <- enrichGO(genes_cluster1_ensembl,
+                        "org.Hs.eg.db",
+      keyType = "ENSEMBL",
+      pvalueCutoff = 0.05)@result
+```
+
+#Plot Genes - Sanity Check
+```{r}
+#genes <- c("ENSG00000125740", "ENSG00000088827", "ENSG00000120738")
+genes <- c(all_clusters_time_response_continuous[[1]]$genes)
+tpm_plots_siggenes <- list()
+
+for(i in 1:length(genes)){
+        plot_df <- data.frame(t(UGA4_longitudinal_tpm_hemo_removed[rownames(UGA4_longitudinal_tpm_hemo_removed) %in% genes[[i]], ]))
+        colnames(plot_df) <- genes[[i]]
+        plot_df$Serology <- UGA4_longitudinal_metadata$Serology[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+        plot_df$Day <- UGA4_longitudinal_metadata$Day[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+        plot_df$ID <- UGA4_longitudinal_metadata$ID[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+        plot_df$BMI <- UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+    
+      tpm_plots_siggenes[[i]] <- ggplot(data = plot_df, aes(x = !!plot_df[,3], y = !!plot_df[,1], color = !!plot_df[,2], group = !!plot_df[,2])) +
+            geom_point(position = position_jitterdodge()) +
+         geom_smooth() +
+        scale_color_manual(values = c("#41521f", "#b4dc7f", "#ea9010"), name = "Response Group") +  
+            labs(title = genenames$hgnc_symbol[match(colnames(plot_df)[[1]], genenames$ensembl_gene_id)], x = "Day", y = "log10(TPM)") +
+          scale_y_log10() +
+            theme_bw() +
+        facet_wrap(~BMI) +
+        theme(axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    axis.title = element_text(size = 20),
+    strip.text = element_text(size = 17),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 15),
+    title = element_text(size = 15),
+    aspect.ratio = 1)
+}
+
+tpm_plots_siggenes
+```
+
+
+# DEPRECATED
+
+
+Old 3A: Heatmap of average scaled counts
+```{r}
+allgenes <- c(sig_LRT_obese$gene, sig_LRT_nonobese$gene)
+
+ntd_categorical <- normTransform(dds_LRT_time_response)[sig_LRT$gene]
+
+allgenes_tpm_df <- t(UGA4_longitudinal_tpm_hemo_removed[rownames(UGA4_longitudinal_tpm_hemo_removed) %in% allgenes, ])
+allgenes_tpm_df <- data.frame(scale(allgenes_tpm_df, center = TRUE, scale = TRUE))
+allgenes_tpm_df$BMI <- UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(allgenes_tpm_df), rownames(UGA4_longitudinal_metadata))]
+allgenes_tpm_df$Serology <- UGA4_longitudinal_metadata$Serology[match(rownames(allgenes_tpm_df), rownames(UGA4_longitudinal_metadata))]
+allgenes_tpm_df$Day <- UGA4_longitudinal_metadata$Day[match(rownames(allgenes_tpm_df), rownames(UGA4_longitudinal_metadata))]
+allgenes_tpm_df <- pivot_longer(allgenes_tpm_df, cols = starts_with("ENSG"), names_to = "gene")
+allgenes_tpm_df$Name <- genenames$hgnc_symbol[match(allgenes_tpm_df$gene, genenames$ensembl_gene_id)]
+
+
+meandata <- allgenes_tpm_df %>% group_by(BMI, Serology, Day, gene, Name) %>% summarise(mean_expr = mean(value))
+meandata$group <- ifelse(meandata$gene %in% sig_LRT_obese$gene & meandata$gene %in% sig_LRT_nonobese$gene, "Both",
+                                ifelse(meandata$gene %in% sig_LRT_obese$gene, "Obese",
+                                       ifelse(meandata$gene %in% sig_LRT_nonobese$gene, "Non Obese", "try again")))
+
+obese_genes <- meandata %>% filter(group %in% c("Obese", "Both"))
+nonobese_genes <- meandata %>% filter(group %in% c("Non Obese", "Both"))
+
+png("./Figures/Fig3/Fig3A_heatmap_obese.png", height = 5000, width = 5000, res = 300, units = "px")
+ggplot(data = obese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
+  geom_tile() + 
+    scale_fill_gradientn(colors = gradient_pal, limits = c(-2, 2), name = "Mean\nZ-Score") +
+    facet_grid(group ~ Serology, scales = "free") +
+  theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 18),
+          axis.text.y = element_text(size = 20),
+          axis.title = element_text(face = "bold", size = 20),
+          strip.text = element_text(size = 20, face = "bold"),
+          legend.text = element_text(size = 15),
+          legend.title = element_text(size = 20))
+dev.off()
+
+png("./Figures/Fig3/Fig3A_heatmap_nonobese.png", height = 5000, width = 5000, res = 300, units = "px")
+ggplot(data = nonobese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
+  geom_tile() + 
+    scale_fill_gradientn(colors = gradient_pal, limits = c(-2, 2), name = "Mean\nZ-Score") +
+    facet_grid(group ~ Serology, scales = "free") +
+  theme_classic() +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 18),
+          axis.text.y = element_text(size = 20),
+          axis.title = element_text(face = "bold", size = 20),
+          strip.text = element_text(size = 20, face = "bold"),
+          legend.text = element_text(size = 15),
+          legend.title = element_text(size = 20))
+dev.off()
+```
+
+#HEATMAP of Non-Obese DE Genes
+```{r}
+genes <- c(sig_LRT_obese$gene, sig_LRT_nonobese$gene)
+
+dds_all <- deseq_import(UGA4_longitudinal_counts_hemo_removed, UGA4_longitudinal_metadata, design_setting = time_serology_model)
+
+ntd_all <- normTransform(dds_all)[genes]
+
+all <- t(data.frame(assay(ntd_all)))
+
+annot_col <- data.frame(genes = colnames(all)) %>%
+  mutate(status = ifelse(genes %in% rownames(ntd_obese), "Both", "Nonobese Only"),
+         symbol = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)]) %>%
+  arrange(status)
+
+```
+
+
+```{r}
+#ntd_nonobese <- normTransform(dds_LRT_time_serology_nonobese)[sig_LRT_nonobese$gene]
+#ntd_obese <- normTransform(dds_LRT_time_serology_obese)[sig_LRT_obese$gene]
+
+ntd_obese <- assay(ntd_all[sig_LRT_obese$gene])[,rownames(obese_metadata)]
+ntd_nonobese <- assay(ntd_all[sig_LRT_nonobese$gene])[,rownames(nonobese_metadata)]
+
+nonobese <- t(data.frame(ntd_nonobese))
+
+annot_col <- data.frame(genes = colnames(nonobese)) %>%
+  mutate(status = ifelse(genes %in% rownames(ntd_obese), "Both", "Nonobese Only"),
+         symbol = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)]) %>%
+  arrange(status)
+
+rownames(nonobese) <- gsub("X", "", rownames(nonobese))
+colnames(nonobese) <- genenames$hgnc_symbol[match(colnames(nonobese), genenames$ensembl_gene_id)]
+
+nonobese <- data.frame(nonobese) %>%
+  mutate(BMI = UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
+         Response = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
+         Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
+  arrange(Day, BMI, Response)
+
+annot_row <- data.frame(Day = nonobese$Day,
+                    Response = nonobese$Response)
+rownames(annot_row) <- rownames(nonobese)
+
+ann_colors = list(
+  Response = c("High Responder" = "#1D6A71", "Non Responder"="#9D5557"),
+  Day = c("0" = "#bed3e5", "3" = "#a7c1e0", "7" = "#6f91c3", "28" = "#823f8a"))
+
+# use this function to make row or column names bold
+# parameters:
+#   mat: the matrix passed to pheatmap
+#   rc_fun: either rownames or colnames
+#   rc_names: vector of names that should appear in boldface
+make_bold_names <- function(mat, rc_fun, rc_names) {
+  bold_names <- rc_fun(mat)
+  ids <- rc_names %>% match(rc_fun(mat))
+  ids %>%
+    walk(
+      function(i)
+        bold_names[i] <<-
+        bquote(bold(.(rc_fun(mat)[i]))) %>%
+        as.expression()
+    )
+  bold_names
+}
+
+pheatmap(nonobese[, c(1:36)],annotation_row = annot_row, cluster_rows = FALSE, scale = "column",
+         #color = colfunc(100),
+         breaks = c(-2, 0, 2),
+         show_rownames = FALSE,
+         gaps_row = seq(0, 312, 78),
+         labels_col = make_bold_names(nonobese[, c(1:36)], colnames, c(annot_col %>% filter(status == "Both") %>% pull(symbol))),
+         annotation_colors = ann_colors,
+         heatmap_legend_param = list(title = "Scaled Expression"))
+```
+
+# HEATMAP of Obese DEGenes
+```{r}
+obese <- t(data.frame(ntd_obese))
+
+annot_col <- data.frame(genes = colnames(obese)) %>%
+  mutate(status = ifelse(genes %in% rownames(ntd_nonobese), "Both", "Obese Only"),
+         symbol = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)]) %>%
+  arrange(status)
+
+colnames(obese) <- genenames$hgnc_symbol[match(colnames(obese), genenames$ensembl_gene_id)]
+rownames(obese) <- gsub("X", "", rownames(obese))
+
+obese <- data.frame(obese) %>%
+  mutate(BMI = UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
+         Response = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
+         Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
+  arrange(Day, BMI, Response)
+
+annot <- data.frame(Day = obese$Day,
+                    Response = obese$Response)
+rownames(annot) <- rownames(obese)
+
+ann_colors = list(
+  Response = c("High Responder" = "#1D6A71", "Non Responder"="#9D5557"),
+  Day = c("0" = "#bed3e5", "3" = "#a7c1e0", "7" = "#6f91c3", "28" = "#823f8a"))
+
+pheatmap(obese[, c(1:22)],annotation_row = annot, cluster_rows = FALSE, scale = "column",
+         #color = colfunc(100),
+         breaks = c(-2, 0, 2),
+         show_rownames = FALSE,
+         gaps_row = seq(0, 180, 46),
+         labels_col = make_bold_names(obese[, c(1:22)], colnames, c(annot_col %>% filter(status == "Both") %>% pull(symbol))),
+         annotation_colors = ann_colors,
+         heatmap_legend_param = list(title = "Scaled Expression"))
+```
+
+```{r}
+nrow(UGA4_longitudinal_metadata %>% filter(Day == 0) %>% filter(Serology == "Non Responder"))
+```
+
+
+# Alternative to Fig3B - Heatmaps
+```{r}
+all_cluster_genes <- c(all_clusters_time_response_continuous[[1]]$genes) #all_clusters_time_response_continuous[[2]]$genes, all_clusters_time_response_continuous[[3]]$genes)
+
+ntd_obese <- assay(normTransform(dds_fullmodel_time_serology_obese)[all_cluster_genes])
+ntd_nonobese <- assay(normTransform(dds_fullmodel_time_serology_nonobese)[all_cluster_genes])
+
+all_normalized_clustergenes <- data.frame(t(cbind(ntd_obese, ntd_nonobese))) 
+
+all_normalized_clustergenes <- all_normalized_clustergenes %>%  mutate(Response = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
+         Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
+         BMI = UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
+  arrange(Response, Day)
+
+  
+  
+all_normalized_clustergenes_obese <- all_normalized_clustergenes %>% filter(BMI == "Obese")
+all_normalized_clustergenes_nonobese <- all_normalized_clustergenes %>% filter(BMI == "Non Obese")
+
+colnames(all_normalized_clustergenes_nonobese) <- genenames$hgnc_symbol[match(colnames(all_normalized_clustergenes_nonobese), genenames$ensembl_gene_id)]
+colnames(all_normalized_clustergenes_obese) <- genenames$hgnc_symbol[match(colnames(all_normalized_clustergenes_obese), genenames$ensembl_gene_id)]
+
+annot_obese <- data.frame(Day = all_normalized_clustergenes_obese$Day,
+                    Response = all_normalized_clustergenes_obese$Response)
+rownames(annot_obese) <- rownames(all_normalized_clustergenes_obese)
+
+annot_nonobese <- data.frame(Day = all_normalized_clustergenes_nonobese$Day,
+                    Response = all_normalized_clustergenes_nonobese$Response)
+rownames(annot_nonobese) <- rownames(all_normalized_clustergenes_nonobese)
+
+ann_colors = list(
+  Response = c("High Responder" = "#1D6A71", "Non Responder"="#9D5557"),
+  Day = c("0" = "#bed3e5", "3" = "#a7c1e0", "7" = "#6f91c3", "28" = "#823f8a"))
+
+
+
+png(file = "./Figures/Fig3/Fig3_obese_heatmap.png", height = 1500, width = 3000, res = 300, units = "px")
+pheatmap(all_normalized_clustergenes_obese[, c(1:30)],
+         annotation_row = annot_obese, 
+         cluster_rows = FALSE, 
+         scale = "column",
+         color = colfunc(100),
+         breaks = c(-3, 0, 3),
+         show_rownames = FALSE,
+         gaps_row = 72,
+         annotation_colors = ann_colors,
+         heatmap_legend_param = list(title = "Scaled Expression"))
+dev.off()
+
+png(file = "./Figures/Fig3/Fig3_nonobese_heatmap.png", height = 1500, width = 3000, res = 300, units = "px")
+pheatmap(all_normalized_clustergenes_nonobese[, c(1:30)],
+         annotation_row = annot_nonobese, 
+         cluster_rows = FALSE, 
+         scale = "column",
+         color = colfunc(100),
+         breaks = c(-3, 0, 3),
+         show_rownames = FALSE,
+         gaps_row = 164,
+         annotation_colors = ann_colors,
+         heatmap_legend_param = list(title = "Scaled Expression"))
+dev.off()
+
+pdf(file = "./Figures/Fig3/Fig3_obese_heatmap.pdf")
+pheatmap(all_normalized_clustergenes_obese[, c(1:30)],
+         annotation_row = annot_obese, 
+         cluster_rows = FALSE, 
+         scale = "column",
+         color = colfunc(100),
+         breaks = c(-3, 0, 3),
+         show_rownames = FALSE,
+         gaps_row = 72,
+         annotation_colors = ann_colors,
+         heatmap_legend_param = list(title = "Scaled Expression"))
+dev.off()
+
+pdf(file = "./Figures/Fig3/Fig3_nonobese_heatmap.pdf")
+pheatmap(all_normalized_clustergenes_nonobese[, c(1:30)],
+         annotation_row = annot_nonobese, 
+         cluster_rows = FALSE, 
+         scale = "column",
+         color = colfunc(100),
+         breaks = c(-3, 0, 3),
+         show_rownames = FALSE,
+         gaps_row = 164,
+         annotation_colors = ann_colors,
+         heatmap_legend_param = list(title = "Scaled Expression"))
+dev.off()
+```

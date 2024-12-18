@@ -1,0 +1,674 @@
+---
+title: "Figure 5"
+output: html_notebook
+---
+
+```{r}
+library(tibble)
+library(biomaRt)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(ggpmisc)
+library(ppcor)
+```
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "/Users/hockmanmr/OneDrive - National Institutes of Health/LAB_STUFF/PEOPLE/meg/manuscripts/CIVIC Longitudinal Transcriptomics")
+```
+
+# Step 1: Import Data
+* Remember to set the appropriate working directory. The .RData file here was generated using "Data Wrangling" and "Preprocessing Scripts"
+* This chunk also sets up some metadata covariates, and the rownames of the metadata.
+* Additionally, generates a table of different gene identifiers that are more human-friendly
+```{r}
+#Load in data
+load("./Scripts/Data/Publication/Longitudinal_complete_data.RData")
+
+#Set up metadata covariates
+UGA4_longitudinal_metadata$BMI_Bivariate <- ifelse(UGA4_longitudinal_metadata$BMI < 30, "Non-Obese",
+                                                   "Obese")
+UGA4_longitudinal_metadata$BMI_Bivariate <- factor(UGA4_longitudinal_metadata$BMI_Bivariate, levels = c("Non-Obese", "Obese"))
+UGA4_longitudinal_metadata$Serology <- ifelse(UGA4_longitudinal_metadata$vax_strain_seroconversion <= 2,
+                                                          "Non Responder", ifelse(UGA4_longitudinal_metadata$vax_strain_seroconversion < 4,
+                                                          "Low Responder", "High Responder"))
+UGA4_longitudinal_metadata$Serology <- factor(UGA4_longitudinal_metadata$Serology, levels = c("Non Responder", "Low Responder", "High Responder"))
+UGA4_longitudinal_metadata$Day <- factor(UGA4_longitudinal_metadata$Day)
+UGA4_longitudinal_metadata$n_prev_vax <- rowSums(UGA4_longitudinal_metadata[c("Vaccine.2.seasons.ago.(fall.2017-spring.2018)", "Vaccine.3.seasons.ago.(fall.2016-spring.2017)", "Vaccine.last.season.(fall.2018-spring.2019)")] == "Y")
+UGA4_longitudinal_metadata$Age_categorical <- ifelse(UGA4_longitudinal_metadata$Age >= 65, "Elderly", "Young")
+
+#Set metadata rownames
+rownames(UGA4_longitudinal_metadata) <- paste0(UGA4_longitudinal_metadata$ID, "_", UGA4_longitudinal_metadata$Day)
+
+#Make a table of human-readable gene names
+mart <- useEnsembl(biomart = "ensembl", "hsapiens_gene_ensembl")#, mirror = "useast")
+geneids <- rownames(UGA4_longitudinal_counts_hemo_removed)
+genenames <- as.data.frame(getBM(filters = "ensembl_gene_id",
+                                 attributes = c("ensembl_gene_id", "hgnc_symbol", "entrezgene_id"),
+                                 values = geneids,
+                                 mart = mart))
+```
+
+# Generate TPM table for cibersortx input
+* This table will be input into the web cibersortx platform - the code only needs to be run once beforehand.
+```{r}
+UGA4_longitudinal_tpm_hemo_removed$symbol <- mapIds(org.Hs.eg.db,
+                                                    keys = rownames(UGA4_longitudinal_tpm_hemo_removed),
+                                                    column = "SYMBOL",
+                                                    keytype = "ENSEMBL")
+
+input_matrix <- UGA4_longitudinal_tpm_hemo_removed  %>%
+  distinct(symbol, .keep_all = T) %>%
+  rownames_to_column(var = "ensbl") %>%
+  dplyr::select(-ensbl) %>%
+  filter(!is.na(symbol)) %>%
+  column_to_rownames(var = "symbol")
+
+input_matrix <- na.omit(input_matrix)
+
+input_matrix <- cbind(rownames(input_matrix), input_matrix)
+
+colnames(input_matrix)[[1]] <- "GeneSymbols"
+
+write.table(input_matrix, file = './Scripts/Data/cibersort_input_matrix_all_days.tsv', sep = "\t", 
+            row.names = FALSE, col.names = TRUE, quote = FALSE)
+
+
+write.table(mixture_file, file = "mixture_file.txt", sep = "\t", row.names = FALSE, col.names = TRUE,quote=FALSE)
+```
+
+# Generate Cibersort output tables
+* This imports the cibersortx output tables that were downloaded from the internet runs, then makes tables for plot generation by adding metadata covariates of interest.
+```{r}
+cibersort_output_LM22 <- read.delim("./Scripts/Data/cibersort/CIBERSORTx_LM22.csv", sep = ",")
+cibersort_output_MCCS <- read.delim("./Scripts/Data/cibersort/CIBERSORTx_MCCS.csv", sep = ",")
+cibersort_output_immunoStates <- read.delim("./Scripts/Data/cibersort/CIBERSORTx_immunoStates.csv", sep = ",")
+
+cell_analysis_LM22 <- cibersort_output_LM22 %>%
+  mutate(Day = UGA4_longitudinal_metadata$Day[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         BMI = UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         BMI_Continuous = UGA4_longitudinal_metadata$BMI[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         Serology = UGA4_longitudinal_metadata$Serology[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         Serology_Continuous = log2(UGA4_longitudinal_metadata$vax_strain_seroconversion[match(rownames(UGA4_longitudinal_metadata), .$Mixture)]),
+         n_prev_vax = UGA4_longitudinal_metadata$n_prev_vax[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         Age = UGA4_longitudinal_metadata$Age_categorical[match(rownames(UGA4_longitudinal_metadata), .$Mixture)])
+
+cell_analysis_MCCS <- cibersort_output_MCCS %>%
+  mutate(Day = UGA4_longitudinal_metadata$Day[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         BMI = UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         BMI_Continuous = UGA4_longitudinal_metadata$BMI[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         Serology = UGA4_longitudinal_metadata$Serology[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         Serology_Continuous = log2(UGA4_longitudinal_metadata$vax_strain_seroconversion[match(rownames(UGA4_longitudinal_metadata), .$Mixture)]),
+         n_prev_vax = UGA4_longitudinal_metadata$n_prev_vax[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         Age = UGA4_longitudinal_metadata$Age_categorical[match(rownames(UGA4_longitudinal_metadata), .$Mixture)])
+
+cell_analysis_immunoStates <- cibersort_output_immunoStates %>%
+  mutate(Day = UGA4_longitudinal_metadata$Day[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         BMI = UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         BMI_Continuous = UGA4_longitudinal_metadata$BMI[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         Serology = UGA4_longitudinal_metadata$Serology[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         Serology_Continuous = log2(UGA4_longitudinal_metadata$vax_strain_seroconversion[match(rownames(UGA4_longitudinal_metadata), .$Mixture)]),
+         n_prev_vax = UGA4_longitudinal_metadata$n_prev_vax[match(rownames(UGA4_longitudinal_metadata), .$Mixture)],
+         Age = UGA4_longitudinal_metadata$Age_categorical[match(rownames(UGA4_longitudinal_metadata), .$Mixture)])
+```
+
+# Statistical Checks
+* This is code to check the distributions of some of the data that will be compared, as well as compare groups of interest. It is meant to be edited based on groups of interest, and is not comprehensive as-written.
+* The Shapiro test looks for normality of the data - if p > 0.05, we can assume the data are normal. If both groups are normally distributed, a t-test is appropriate. However, if one or both are non-normal, the wilcoxon test should be used. 
+* As at least one of the comparison groups in the data are typically non-normally distributed, a wilcoxon test is used for comparisons.
+```{r}
+terms_to_plot <- c("CD8_positive_alpha_beta_T_cell", "T.cells.CD8", "DCs_IL_10", "Mast.cells.resting", "Plasma.cells", "B.cells.memory", "memory_B_cell")
+
+variables <- c("BMI", "Serology")
+
+Days <- c(0, 3, 7, 28)
+
+unique(all_cibersort$Serology)
+
+mean(all_cibersort %>% filter(BMI == 1) %>% pull(DCs_IL_10))
+sd(all_cibersort %>% filter(BMI == 1) %>% pull(DCs_IL_10))
+mean(all_cibersort %>% filter(BMI == 2) %>% pull(DCs_IL_10))
+sd(all_cibersort %>% filter(BMI == 2) %>% pull(DCs_IL_10))
+
+
+stats_data <- data.frame(matrix(NA, nrow = 56, ncol = 10))
+mean_data <- data.frame(matrix(NA, nrow = ))
+
+all_cibersort$BMI <- as.numeric(all_cibersort$BMI)
+all_cibersort$Serology <- as.numeric(all_cibersort$Serology)
+
+cell_analysis_MCCS$BMI_Stats <- ifelse(cell_analysis_MCCS$BMI == "Obese", 1, 0)
+cell_analysis_MCCS$Serology
+
+x <- as.data.frame(wilcox.test(all_cibersort %>%
+              #filter(Serology == "Non Responder") %>% 
+              #filter(BMI == "Non Obese") %>% 
+              filter(Day == 3) %>%
+              pull(Serology),
+              all_cibersort %>% 
+              #filter(Serology == "High Responder") %>% 
+              #filter(BMI == 1) %>% 
+              filter(Day == 3) %>%
+              pull(DCs_IL_10),
+            paired = FALSE))
+ wilcox_effsize()
+
+shapiro.test(cell_analysis_LM22 %>% 
+         filter(Serology == "High Responder") %>% 
+         filter(BMI == "Non Obese") %>% 
+         filter(Day == 7) %>%
+         pull(T.cells.CD8))
+
+LM22_d3 <- cell_analysis_LM22 %>% filter(Day == 3) %>% filter(BMI == "Obese")
+
+pcor.test(LM22_d3$Serology_Continuous, LM22_d3$T.cells.CD8 , LM22_d3$Age, method = "spearman")
+cor.test(LM22_d3$Serology_Continuous, LM22_d3$T.cells.CD8, method = "spearman")
+
+days <- c(0, 3, 5, 7)
+lm22_cor <- data.frame(matrix(NA, nrow = (ncol(lm22_df) - 11)))
+for(i in 1:4){
+  lm22_df <- cell_analysis_LM22 %>% filter(Day == days[[i]])
+  for(j in 2:(ncol(lm22_df) - 10)){
+    lm22_cor[j, 1] <- colnames(lm22_df)[[j]]
+    lm22_cor[j, 2] <- pcor.test(lm22_df[,j], lm22_df$BMI_Continuous, lm22_df$Age, method = "spearman")$p.value
+  }
+}
+
+pcor.test(LM22_d3$BMI_Continuous, LM22_d3$B.cells.memory , LM22_d3$Age, method = "spearman")
+
+cor.test(LM22_d7$BMI_Continuous, LM22_d7$B.cells.memory, method = "spearman")$p.value
+
+spcor.test(immunoStates_d7$Serology_Continuous, immunoStates_d7$plasma_cell, immunoStates_d7$Age)
+```
+
+#Vaccine Response Comparison
+* Plots all cell types stratified by vaccine response, for exploration.
+```{r}
+plotlist_LM22_vax <- list()
+plotlist_LM22_vax_continuous <- list()
+
+plotlist_MCCS_vax <- list()
+plotlist_MCCS_vax_continuous <- list()
+
+plotlist_immunoStates_vax <- list()
+plotlist_immunoStates_vax_continuous <- list()
+
+pops_LM22 <- colnames(cell_analysis_LM22)[c(2:23)]
+pops_MCCS <- colnames(cell_analysis_MCCS)[c(2:13)]
+pops_immunoStates <- colnames(cell_analysis_immunoStates)[c(2:21)]
+
+for(i in 1:length(pops_LM22)){
+ plotlist_LM22_vax[[i]] <- ggplot(cell_analysis_LM22, aes(x = Serology, y = !!cell_analysis_LM22[, pops_LM22[[i]]], color = Serology)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#601A4A", "#EE442F", "#63ACBE")) +
+  labs(title = pops_LM22[[i]]) +
+   geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+   facet_grid(.~Day) +
+   theme_bw()
+}
+
+for(i in 1:length(pops_LM22)){
+ plotlist_LM22_vax_continuous[[i]] <- ggplot(cell_analysis_LM22, aes(x = Serology_Continuous, y = !!cell_analysis_LM22[, pops_LM22[[i]]])) +
+  geom_smooth(method = "lm", color = "#9D5557") +
+  geom_point(alpha = 0.5) +
+  stat_fit_glance(method = 'lm',
+                       method.args = list(formula = y ~ x),
+                       geom = 'text',
+                       aes(label = paste("P-value = ", signif(..p.value.., digits = 4), sep = "")),
+                       label.x = 'middle', label.y = 'top', size = 5) +
+  labs(title = pops_LM22[[i]]) +
+  facet_grid(.~Day) +
+  theme_bw()
+}
+
+for(i in 1:length(pops_MCCS)){
+ plotlist_MCCS_vax[[i]] <- ggplot(cell_analysis_MCCS, aes(x = Serology, y = !!cell_analysis_MCCS[, pops_MCCS[[i]]], color = Serology)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#601A4A", "#EE442F", "#63ACBE")) +
+  labs(title = pops_MCCS[[i]]) +
+   geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+   facet_grid(.~Day) +
+   theme_bw()
+}
+
+for(i in 1:length(pops_MCCS)){
+ plotlist_MCCS_vax_continuous[[i]] <- ggplot(cell_analysis_MCCS, aes(x = Serology_Continuous, y = !!cell_analysis_MCCS[, pops_MCCS[[i]]])) +
+  geom_smooth(method = "lm", color = "#9D5557") +
+  geom_point(alpha = 0.5) +
+  stat_fit_glance(method = 'lm',
+                       method.args = list(formula = y ~ x),
+                       geom = 'text',
+                       aes(label = paste("P-value = ", signif(..p.value.., digits = 4), sep = "")),
+                       label.x = 'middle', label.y = 'top', size = 5) +
+  labs(title = pops_MCCS[[i]]) +
+  facet_grid(.~Day) +
+  theme_bw()
+}
+
+for(i in 1:length(pops_immunoStates)){
+ plotlist_immunoStates_vax[[i]] <- ggplot(cell_analysis_immunoStates, aes(x = Serology, y = !!cell_analysis_immunoStates[, pops_immunoStates[[i]]], color = Serology)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#601A4A", "#EE442F", "#63ACBE")) +
+  labs(title = pops_immunoStates[[i]]) +
+   geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+   facet_grid(.~Day) +
+   theme_bw()
+}
+
+for(i in 1:length(pops_immunoStates)){
+ plotlist_immunoStates_vax_continuous[[i]] <- ggplot(cell_analysis_immunoStates, aes(x = Serology_Continuous, y = !!cell_analysis_immunoStates[, pops_immunoStates[[i]]])) +
+  geom_smooth(method = "lm", color = "#9D5557") +
+  geom_point(alpha = 0.5) +
+  stat_fit_glance(method = 'lm',
+                       method.args = list(formula = y ~ x),
+                       geom = 'text',
+                       aes(label = paste("P-value = ", signif(..p.value.., digits = 4), sep = "")),
+                       label.x = 'middle', label.y = 'top', size = 5) +
+  labs(title = pops_immunoStates[[i]]) +
+  facet_grid(.~Day) +
+  theme_bw()
+}
+
+plotlist_immunoStates_vax
+plotlist_MCCS_vax
+plotlist_LM22_vax
+plotlist_LM22_vax_continuous
+plotlist_immunoStates_vax_continuous
+plotlist_MCCS_vax_continuous
+```
+
+#BMI Comparison
+* Plots all cell types stratified by BMI, for exploration.
+```{r}
+plotlist_LM22_bmi <- list()
+plotlist_LM22_bmi_continuous <- list()
+
+plotlist_MCCS_bmi <- list()
+plotlist_MCCS_bmi_continuous <- list()
+
+plotlist_immunoStates_bmi <- list()
+plotlist_immunoStates_bmi_continuous <- list()
+
+pops_LM22 <- colnames(cell_analysis_LM22)[c(2:23)]
+pops_MCCS <- colnames(cell_analysis_MCCS)[c(2:13)]
+pops_immunoStates <- colnames(cell_analysis_immunoStates)[c(2:21)]
+
+for(i in 1:length(pops_LM22)){
+ plotlist_LM22_bmi[[i]] <- ggplot(cell_analysis_LM22, aes(x = Day, y = !!cell_analysis_LM22[, pops_LM22[[i]]], color = BMI)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#289F90", "#EAC36F")) +
+  labs(title = pops_LM22[[i]]) +
+   geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+   #facet_grid(n_prev_vax~.) +
+   theme_bw()
+}
+
+plotlist_LM22_bmi[[1]]
+
+for(i in 1:length(pops_LM22)){
+ plotlist_LM22_bmi_continuous[[i]] <- ggplot(cell_analysis_LM22, aes(x = BMI_Continuous, y = !!cell_analysis_LM22[, pops_LM22[[i]]])) +
+  geom_smooth(method = "lm", color = "#9D5557") +
+  geom_point(alpha = 0.5) +
+  stat_fit_glance(method = 'lm',
+                       method.args = list(formula = y ~ x),
+                       geom = 'text',
+                       aes(label = paste("P-value = ", signif(..p.value.., digits = 4), sep = "")),
+                       label.x = 'middle', label.y = 'top', size = 5) +
+  labs(title = pops_LM22[[i]]) +
+  facet_grid(.~Day) +
+  theme_bw()
+}
+
+for(i in 1:length(pops_MCCS)){
+ plotlist_MCCS_bmi[[i]] <- ggplot(cell_analysis_MCCS, aes(x = Day, y = !!cell_analysis_MCCS[, pops_MCCS[[i]]], color = BMI)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#289F90", "#EAC36F")) +
+  labs(title = pops_MCCS[[i]]) +
+   geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+   #facet_grid(n_prev_vax~.) +
+   theme_bw()
+}
+
+for(i in 1:length(pops_MCCS)){
+ plotlist_MCCS_bmi_continuous[[i]] <- ggplot(cell_analysis_MCCS, aes(x = BMI_Continuous, y = !!cell_analysis_MCCS[, pops_MCCS[[i]]])) +
+  geom_smooth(method = "lm", color = "#9D5557") +
+  geom_point(alpha = 0.5) +
+  stat_fit_glance(method = 'lm',
+                       method.args = list(formula = y ~ x),
+                       geom = 'text',
+                       aes(label = paste("P-value = ", signif(..p.value.., digits = 4), sep = "")),
+                       label.x = 'middle', label.y = 'top', size = 5) +
+  labs(title = pops_MCCS[[i]]) +
+  facet_grid(.~Day) +
+  theme_bw()
+}
+
+for(i in 1:length(pops_immunoStates)){
+ plotlist_immunoStates_bmi[[i]] <- ggplot(cell_analysis_immunoStates, aes(x = Day, y = !!cell_analysis_immunoStates[, pops_immunoStates[[i]]], color = BMI)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#289F90", "#EAC36F")) +
+  labs(title = pops_immunoStates[[i]]) +
+   geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+   #facet_grid(n_prev_vax~Day) +
+   theme_bw()
+}
+
+for(i in 1:length(pops_immunoStates)){
+ plotlist_immunoStates_bmi_continuous[[i]] <- ggplot(cell_analysis_immunoStates, aes(x = BMI_Continuous, y = !!cell_analysis_immunoStates[, pops_immunoStates[[i]]])) +
+  geom_smooth(method = "lm", color = "#9D5557") +
+  geom_point(alpha = 0.5) +
+  stat_fit_glance(method = 'lm',
+                       method.args = list(formula = y ~ x),
+                       geom = 'text',
+                       aes(label = paste("P-value = ", signif(..p.value.., digits = 4), sep = "")),
+                       label.x = 'middle', label.y = 'top', size = 5) +
+  labs(title = pops_immunoStates[[i]]) +
+  facet_grid(.~Day) +
+  theme_bw()
+}
+
+plotlist_immunoStates_bmi
+plotlist_MCCS_bmi
+plotlist_LM22_bmi
+#plotlist_LM22_bmi_continuous
+#plotlist_immunoStates_bmi_continuous
+#plotlist_MCCS_bmi_continuous
+```
+
+#Bivariate Comparison
+* Plots all cell types stratified by vaccine response and BMI, for exploration.
+```{r}
+plotlist_LM22_bivariate <- list()
+
+plotlist_MCCS_bivariate <- list()
+
+plotlist_immunoStates_bivariate <- list()
+
+pops_LM22 <- colnames(cell_analysis_LM22)[c(2:23)]
+pops_MCCS <- colnames(cell_analysis_MCCS)[c(2:13)]
+pops_immunoStates <- colnames(cell_analysis_immunoStates)[c(2:21)]
+
+for(i in 1:length(pops_LM22)){
+ plotlist_LM22_bivariate[[i]] <- ggplot(cell_analysis_LM22, aes(x = Day, y = !!cell_analysis_LM22[, pops_LM22[[i]]], color = Serology)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#601A4A", "#EE442F", "#63ACBE")) +
+  labs(title = pops_LM22[[i]]) +
+   geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+   facet_grid(.~BMI) +
+   theme_bw()
+}
+
+for(i in 1:length(pops_MCCS)){
+ plotlist_MCCS_bivariate[[i]] <- ggplot(cell_analysis_MCCS, aes(x = Day, y = !!cell_analysis_MCCS[, pops_MCCS[[i]]], color = Serology)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#601A4A", "#EE442F", "#63ACBE")) +
+  labs(title = pops_MCCS[[i]]) +
+   geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+   facet_grid(.~BMI) +
+   theme_bw()
+}
+
+for(i in 1:length(pops_immunoStates)){
+ plotlist_immunoStates_bivariate[[i]] <- ggplot(cell_analysis_immunoStates, aes(x = Day, y = !!cell_analysis_immunoStates[, pops_immunoStates[[i]]], color = Serology)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#601A4A", "#EE442F", "#63ACBE")) +
+  labs(title = pops_immunoStates[[i]]) +
+   geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+   facet_grid(.~BMI) +
+   theme_bw()
+}
+
+
+plotlist_immunoStates_bivariate
+plotlist_MCCS_bivariate
+plotlist_LM22_bivariate
+```
+
+```{r}
+terms_to_plot <- c("Plasma.cells", "T.cells.CD8", "DCs_IL_10")
+
+serology_comparisons <- list(c("High Responder", "Non Responder"), c("High Responder", "Low Responder"), c("Low Responder", "Non Responder"))
+
+all_cibersort <- merge(cell_analysis_immunoStates, cell_analysis_LM22, by = c("BMI", "BMI_Continuous", "Serology", "Serology_Continuous", "Day", "n_prev_vax", "Age"))
+all_cibersort <- merge(all_cibersort, cell_analysis_MCCS, by = c("BMI", "BMI_Continuous", "Serology", "Serology_Continuous", "Day", "n_prev_vax", "Age"))
+
+all_cibersort$Day <- factor(all_cibersort$Day)
+
+plotlist_figure_a <- list()
+plotlist_figure_b <- list()
+plotlist_figure_c <- list()
+
+for(i in 1:length(terms_to_plot)){
+ plotlist_figure_a[[i]] <- ggplot(all_cibersort, aes(x = Day, y = !!all_cibersort[, terms_to_plot[[i]]], color = Serology)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#601A4A", "#EE442F", "#63ACBE")) +
+  labs(title = terms_to_plot[[i]], y = "Proportion") +
+  geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        axis.text.x = element_text(face = "bold",size = 12),
+aspect.ratio = 1,
+axis.title = element_text(size = 14),
+strip.text = element_text(size = 14),
+legend.title = element_text(face = "bold", size = 12),
+title = element_blank())
+ 
+plotlist_figure_b[[i]] <- ggplot(all_cibersort, aes(x = Day, y = !!all_cibersort[, terms_to_plot[[i]]], color = BMI)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#289F90", "#EAC36F")) +
+  labs(title = terms_to_plot[[i]], y = "Proportion") +
+  geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        axis.text.x = element_text(face = "bold", size = 12),
+aspect.ratio = 1,
+axis.title = element_text(size = 14),
+strip.text = element_text(size = 14),
+legend.title = element_text(face = "bold", size = 12),
+title = element_blank())
+
+ plotlist_figure_c[[i]] <- ggplot(all_cibersort, aes(x = Day, y = !!all_cibersort[, terms_to_plot[[i]]], color = Serology)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#601A4A", "#EE442F", "#63ACBE")) +
+  labs(title = terms_to_plot[[i]], y = "Proportion") +
+  geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+  facet_grid(~BMI) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        axis.text.x = element_text(face = "bold",
+size = 12),
+aspect.ratio = 1,
+axis.title = element_text(size = 14),
+strip.text = element_text(size = 14),
+legend.title = element_text(face = "bold", size = 12),
+title = element_blank())
+}
+
+plotlist_figure_a
+plotlist_figure_b
+plotlist_figure_c
+for(i in 1:length(plotlist_figure_a)){
+  pdf(paste0("./Figures/Fig5/",terms_to_plot[[i]], "_response.pdf"))
+  print(plotlist_figure_a[[i]])
+  dev.off()
+}
+
+for(i in 1:length(plotlist_figure_b)){
+  pdf(paste0("./Figures/Fig5/",terms_to_plot[[i]], "_bmi.pdf"))
+  print(plotlist_figure_b[[i]])
+  dev.off()
+}
+
+for(i in 1:length(plotlist_figure_c)){
+  pdf(paste0("./Figures/Fig5/",terms_to_plot[[i]], "_bmi_response.pdf"))
+  print(plotlist_figure_c[[i]])
+  dev.off()
+}
+
+for(i in 1:length(plotlist_figure_b)){
+  png(filename = paste0("./Figures/Fig5/",terms_to_plot[[i]], "_bmi.png"), height = 1600, width = 1700, res = 300, units = "px")
+  print(plotlist_figure_b[[i]])
+  dev.off()
+}
+
+for(i in 1:length(plotlist_figure_c)){
+  png(filename = paste0("./Figures/Fig5/",terms_to_plot[[i]], "_bmi_response.png"), height = 1600, width = 3000, res = 300, units = "px")
+  print(plotlist_figure_c[[i]])
+  dev.off()
+}
+```
+
+```{r}
+terms_to_plot <- c("T.cells.CD8", "DCs_IL_10", "Mast.cells.resting", "Plasma.cells", "B.cells.memory", "memory_B_cell")
+
+all_cibersort <- merge(cell_analysis_immunoStates, cell_analysis_LM22, by = c("BMI", "BMI_Continuous", "Serology", "Serology_Continuous", "Day", "n_prev_vax", "Age"))
+all_cibersort <- merge(all_cibersort, cell_analysis_MCCS, by = c("BMI", "BMI_Continuous", "Serology", "Serology_Continuous", "Day", "n_prev_vax", "Age"))
+
+all_cibersort$Day <- factor(all_cibersort$Day)
+
+plotlist_supplement_a <- list()
+plotlist_supplement_b <- list()
+plotlist_supplement_c <- list()
+
+for(i in 1:length(terms_to_plot)){
+ plotlist_supplement_a[[i]] <- ggplot(all_cibersort, aes(x = Day, y = !!all_cibersort[, terms_to_plot[[i]]], color = Serology)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#601A4A", "#EE442F", "#63ACBE")) +
+  labs(title = terms_to_plot[[i]], y = "Proportion") +
+  geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+  facet_grid(.~Age) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        axis.text.x = element_text(face = "bold",size = 12),
+aspect.ratio = 1,
+axis.title = element_text(size = 14),
+strip.text = element_text(size = 14),
+legend.title = element_text(face = "bold", size = 12))
+#title = element_blank())
+ 
+plotlist_supplement_b[[i]] <- ggplot(all_cibersort, aes(x = Day, y = !!all_cibersort[, terms_to_plot[[i]]], color = BMI)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#289F90", "#EAC36F")) +
+  labs(title = terms_to_plot[[i]], y = "Proportion") +
+  facet_grid(.~Age) +
+  geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        axis.text.x = element_text(face = "bold", size = 12),
+aspect.ratio = 1,
+axis.title = element_text(size = 14),
+strip.text = element_text(size = 14),
+legend.title = element_text(face = "bold", size = 12))
+#title = element_blank())
+
+ plotlist_supplement_c[[i]] <- ggplot(all_cibersort, aes(x = Day, y = !!all_cibersort[, terms_to_plot[[i]]], color = Serology)) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge(), alpha = 0.5) +
+  scale_color_manual(values = c("#601A4A", "#EE442F", "#63ACBE")) +
+  labs(title = terms_to_plot[[i]], y = "Proportion") +
+   geom_pwc(method = "wilcox_test", label = "p.signif", hide.ns = TRUE, vjust = 0.5) +
+  facet_grid(Age~BMI) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        axis.text.x = element_text(face = "bold",
+size = 12),
+aspect.ratio = 1,
+axis.title = element_text(size = 14),
+strip.text = element_text(size = 14),
+legend.title = element_text(face = "bold", size = 12))
+#title = element_blank())
+}
+
+plotlist_supplement_a
+plotlist_supplement_b
+plotlist_supplement_c
+
+pdf("./Figures/Supplement/Fig5Supplement.pdf", onefile = TRUE)
+#Plasma Cells
+plotlist_supplement_a[[4]]
+plotlist_supplement_c[[4]]
+#IL-10 DCs
+plotlist_supplement_b[[2]]
+plotlist_supplement_c[[2]]
+#CD8 T Cells
+plotlist_supplement_c[[1]]
+dev.off()
+```
+
+###DEPRECATED#######
+
+```{r}
+terms_to_plot <- c("CD8_positive_alpha_beta_T_cell", "T.cells.CD8", "DCs_IL_10", "Mast.cells.resting", "Plasma.cells", "B.cells.memory", "memory_B_cell")
+vars_3 <- c("Serology", "BMI", "Day")
+vars_2 <- c("Serology", "Day")
+
+all_cibersort <- merge(cell_analysis_immunoStates[, !colnames(cell_analysis_immunoStates) %in% c("P.value", "Correlation", "RMSE")], 
+                       cell_analysis_LM22[, !colnames(cell_analysis_LM22) %in% c("P.value", "Correlation", "RMSE")], 
+                       by = c("BMI", "BMI_Continuous", "Serology", "Serology_Continuous", "Day", "n_prev_vax", "Age"))
+all_cibersort <- merge(all_cibersort, cell_analysis_MCCS[, !colnames(cell_analysis_MCCS) %in% c("P.value", "Correlation", "RMSE")], by = c("BMI", "BMI_Continuous", "Serology", "Serology_Continuous", "Day", "n_prev_vax", "Age"))
+
+all_cibersort <- all_cibersort %>% mutate(Serology = factor(Serology),
+                                                                    BMI = factor(BMI))
+
+all_cibersort <- all_cibersort[,colnames(all_cibersort) %in% c(terms_to_plot, vars_3)] %>% arrange(Day, BMI, Serology)
+
+mean_df_3 <- data.frame(matrix(nrow = 24))
+
+for(i in 1:length(terms_to_plot)) {
+  x <- all_cibersort %>%
+    group_by_at(vars_3) %>%
+        summarise_at(vars(terms_to_plot[[i]]),
+                 list(Mean_Frequency = mean))
+  mean_df_3[, terms_to_plot[[i]]] <- x$Mean_Frequency
+  mean_df_3$Day <- x$Day
+  mean_df_3$Serology <- x$Serology
+  mean_df_3$BMI <- x$BMI
+}
+
+mean_df_2 <- data.frame(matrix(nrow = 24))
+
+for(i in 1:length(terms_to_plot)) {
+  x <- all_cibersort %>%
+    group_by_at(vars_2) %>%
+        summarise_at(vars(terms_to_plot[[i]]),
+                 list(Mean_Frequency = mean))
+  mean_df_2[, terms_to_plot[[i]]] <- x$Mean_Frequency
+  mean_df_2$Day <- x$Day
+  mean_df_2$Serology <- x$Serology
+}
+
+plotlist_3 <- list()
+plotlist_2 <- list()
+
+for(i in 1:length(terms_to_plot)){
+  plot_df_3 <- mean_df_3[, c("Serology", "BMI", "Day", terms_to_plot[[i]])]
+  plotlist_3[[i]] <- ggplot(data = plot_df_3, aes(x = !!plot_df_3[, "Day"], y = !!plot_df_3[, "Serology"], fill = !!plot_df_3[, terms_to_plot[[i]]])) +
+  geom_tile() +
+    labs(title = terms_to_plot[[i]]) +
+  facet_grid(.~BMI)
+  
+    plot_df_2 <- mean_df_2[, c("Serology", "Day", terms_to_plot[[i]])]
+  plotlist_2[[i]] <- ggplot(data = plot_df_2, aes(x = !!plot_df_2[, "Day"], y = !!plot_df_2[, "Serology"], fill = !!plot_df_2[, terms_to_plot[[i]]])) +
+  geom_tile() +
+    labs(title = terms_to_plot[[i]])
+}
+
+plotlist_2
+plotlist_3
+```
+
+

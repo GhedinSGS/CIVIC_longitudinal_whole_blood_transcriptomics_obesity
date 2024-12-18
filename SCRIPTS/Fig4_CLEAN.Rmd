@@ -1,0 +1,808 @@
+---
+title: "Figure 4: Gene Set Enrichment over time"
+output: html_notebook
+---
+
+
+```{r}
+library(DESeq2)
+library(dplyr)
+library(biomaRt)
+library(DEGreport)
+library(ggplot2)
+library(clusterProfiler)
+library(ggpubr)
+library(UpSetR)
+library(cowplot)
+library(tidyr)
+library(ComplexHeatmap)
+library(paletteer)
+
+library(ggpmisc)
+library(NatParksPalettes)
+library(enrichplot)
+library(ReactomePA)
+library(edgeR)
+```
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "/Users/hockmanmr/OneDrive - National Institutes of Health/LAB_STUFF/PEOPLE/meg/manuscripts/CIVIC Longitudinal Transcriptomics")
+```
+
+# Step 1: Import Data
+Remember to set the appropriate working directory. The .RData file here was generated using "Data Wrangling" and "Preprocessing Scripts"
+```{r}
+load("./Scripts/Data/Publication/Longitudinal_complete_data.RData")
+colfunc <- colorRampPalette(c("#62a1db","#e7d87d", "#dd9f40","#b4451f", "#b01111"))
+```
+
+## Set up Metadata
+* Set "Day" as a factor - I want DESeq to consider nonlinear patterns in expression
+* Add a bivariate, categorical classification for BMI, and make it a factor
+* Set a categorical classifier for serology, grouping patients by their seroconversion values
+* Set metadata rownames for downstream analyses
+* Center BMI, seroconversion score, and age for DESeq
+* Generate a table of different gene identifiers
+```{r}
+#Set up a few variables
+UGA4_longitudinal_metadata$Day <- factor(UGA4_longitudinal_metadata$Day)
+UGA4_longitudinal_metadata$BMI_Bivariate <- ifelse(UGA4_longitudinal_metadata$BMI < 30, "Non Obese",
+                                                   "Obese")
+UGA4_longitudinal_metadata$BMI_Bivariate <- factor(UGA4_longitudinal_metadata$BMI_Bivariate, levels = c("Non Obese", "Obese"))
+UGA4_longitudinal_metadata$Serology <- ifelse(UGA4_longitudinal_metadata$vax_strain_seroconversion <= 2,
+                                                          "Non Responder", ifelse(UGA4_longitudinal_metadata$vax_strain_seroconversion < 4,
+                                                          "Low Responder", "High Responder"))
+UGA4_longitudinal_metadata$Serology <- factor(UGA4_longitudinal_metadata$Serology, levels = c("Non Responder", "Low Responder", "High Responder"))
+
+#Set rownames
+rownames(UGA4_longitudinal_metadata) <- paste0(UGA4_longitudinal_metadata$ID, "_", UGA4_longitudinal_metadata$Day)
+
+#Center data, because DESeq throws a warning when it's not 
+UGA4_longitudinal_metadata$BMI_centered <- scale(UGA4_longitudinal_metadata$BMI, center = TRUE)
+UGA4_longitudinal_metadata$seroconversion_centered <- scale(UGA4_longitudinal_metadata$vax_strain_seroconversion, center = TRUE)
+UGA4_longitudinal_metadata$Age_centered <- scale(UGA4_longitudinal_metadata$Age, center = TRUE)
+
+#Generate a table of gene names for different applications (human-readable)
+mart <- useEnsembl(biomart = "ensembl", "hsapiens_gene_ensembl")#, mirror = "useast")
+geneids <- rownames(UGA4_longitudinal_counts_hemo_removed)
+genenames <- as.data.frame(getBM(filters = "ensembl_gene_id",
+                                 attributes = c("ensembl_gene_id", "hgnc_symbol", "entrezgene_id"),
+                                 values = geneids,
+                                 mart = mart))
+```
+
+## Set deseq import function
+* Makes a function to make deseq objects from data, checks to make sure that the count colnames are equal to the metadata rownames, a requirement for deseq. Designed to be flexible when considering single day or multi-day data.
+```{r}
+deseq_import <- function(counts, metadata, design_setting = ~1) {
+  ifelse(length(unique(metadata$Day)) > 1,
+  rownames(metadata) <- paste0(metadata$ID, "_", metadata$Day),
+  rownames(metadata) <- metadata$ID)
+
+  if (all(rownames(metadata) == colnames(counts))) {
+    object <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(counts)),
+      colData = metadata,
+      design = design_setting)} else {
+    "names not equal"
+  }
+  return(object)
+}
+```
+
+## Divide data by day and obesity category.
+* Generates tables of data split by both study day and obesity variable
+```{r}
+# Divide Day 0 Data
+Day0_obese_metadata <- UGA4_longitudinal_metadata %>% filter(Day == 0) %>%
+  filter(BMI_Bivariate %in% "Obese") %>%
+  filter(Serology %in% c("High Responder", "Non Responder"))
+Day0_obese_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(Day0_obese_metadata)]
+
+Day0_nonobese_metadata <- UGA4_longitudinal_metadata %>% filter(Day == 0) %>%
+  filter(BMI_Bivariate %in% "Non Obese") %>%
+  filter(Serology %in% c("High Responder", "Non Responder"))
+Day0_nonobese_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(Day0_nonobese_metadata)]
+Day0_nonobese_tpm <- UGA4_longitudinal_tpm_hemo_removed[colnames(UGA4_longitudinal_tpm_hemo_removed) %in% rownames(Day0_nonobese_metadata)]
+
+# Divide Day 3 Data
+Day3_obese_metadata <- UGA4_longitudinal_metadata %>% filter(Day == 3) %>%
+  filter(BMI_Bivariate %in% "Obese") %>%
+  filter(Serology %in% c("High Responder", "Non Responder"))
+Day3_obese_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(Day3_obese_metadata)]
+Day3_obese_tpm <- UGA4_longitudinal_tpm_hemo_removed[colnames(UGA4_longitudinal_tpm_hemo_removed) %in% rownames(Day3_obese_metadata)]
+
+Day3_nonobese_metadata <- UGA4_longitudinal_metadata %>% filter(Day == 3) %>%
+  filter(BMI_Bivariate %in% "Non Obese") %>%
+  filter(Serology %in% c("High Responder", "Non Responder"))
+Day3_nonobese_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(Day3_nonobese_metadata)]
+Day3_nonobese_tpm <- UGA4_longitudinal_tpm_hemo_removed[colnames(UGA4_longitudinal_tpm_hemo_removed) %in% rownames(Day3_nonobese_metadata)]
+
+# Divide Day 7 Data
+Day7_obese_metadata <- UGA4_longitudinal_metadata %>% filter(Day == 7) %>% 
+  filter(BMI_Bivariate %in% "Obese") %>%
+  filter(Serology %in% c("High Responder", "Non Responder"))
+Day7_obese_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(Day7_obese_metadata)]
+Day7_obese_tpm <- UGA4_longitudinal_tpm_hemo_removed[colnames(UGA4_longitudinal_tpm_hemo_removed) %in% rownames(Day7_obese_metadata)]
+
+Day7_nonobese_metadata <- UGA4_longitudinal_metadata %>% filter(Day == 7) %>%
+  filter(BMI_Bivariate %in% "Non Obese") %>%
+  filter(Serology %in% c("High Responder", "Non Responder"))
+Day7_nonobese_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(Day7_nonobese_metadata)]
+Day7_nonobese_tpm <- UGA4_longitudinal_tpm_hemo_removed[colnames(UGA4_longitudinal_tpm_hemo_removed) %in% rownames(Day7_nonobese_metadata)]
+
+# Divide Day 28 Data
+Day28_obese_metadata <- UGA4_longitudinal_metadata %>% filter(Day == 28) %>%
+  filter(BMI_Bivariate %in% "Obese") %>%
+  filter(Serology %in% c("High Responder", "Non Responder"))
+Day28_obese_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(Day28_obese_metadata)]
+Day28_obese_tpm <- UGA4_longitudinal_tpm_hemo_removed[colnames(UGA4_longitudinal_tpm_hemo_removed) %in% rownames(Day28_obese_metadata)]
+
+Day28_nonobese_metadata <- UGA4_longitudinal_metadata %>% filter(Day == 28) %>%
+  filter(BMI_Bivariate %in% "Non Obese") %>%
+  filter(Serology %in% c("High Responder", "Non Responder"))
+Day28_nonobese_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(Day28_nonobese_metadata)]
+Day28_nonobese_tpm <- UGA4_longitudinal_tpm_hemo_removed[colnames(UGA4_longitudinal_tpm_hemo_removed) %in% rownames(Day28_nonobese_metadata)]
+```
+
+
+# DESeq Analysis: Differentially expressed genes by serology
+* Performs differential expression analysis with respect to response as a categorical variable (Serology)
+* Keep only rows that have a count of at least 10 in the smallest group considered.
+* Uses lfcshrink on the variable of interest, Serology
+* Pull out differentially expressed genes
+```{r}
+dds_d0_obese <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(Day0_obese_counts)),
+      colData = Day0_obese_metadata,
+      design = ~ Serology + Gender + Age_centered)
+
+dds_d0_nonobese <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(Day0_nonobese_counts)),
+      colData = Day0_nonobese_metadata,
+      design = ~ Serology + Gender + Age_centered)
+
+dds_d3_obese <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(Day3_obese_counts)),
+      colData = Day3_obese_metadata,
+      design = ~ Serology + Gender + Age_centered)
+
+dds_d3_nonobese <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(Day3_nonobese_counts)),
+      colData = Day3_nonobese_metadata,
+      design = ~ Serology + Gender + Age_centered)
+
+dds_d7_obese <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(Day7_obese_counts)),
+      colData = Day7_obese_metadata,
+      design = ~ Serology + Gender + Age_centered)
+
+dds_d7_nonobese <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(Day7_nonobese_counts)),
+      colData = Day7_nonobese_metadata,
+      design = ~ Serology + Gender + Age_centered)
+
+dds_d28_obese <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(Day28_obese_counts)),
+      colData = Day28_obese_metadata,
+      design = ~ Serology + Gender + Age_centered)
+
+dds_d28_nonobese <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(Day28_nonobese_counts)),
+      colData = Day28_nonobese_metadata,
+      design = ~ Serology + Gender + Age_centered)
+
+dds_d0_obese <- estimateSizeFactors(dds_d0_obese)
+keep_d0_obese <- rowSums(counts(dds_d0_obese, normalized = TRUE) >= 10 ) >= 44 # I'm filtering for genes that have >10 counts in 90% of the individuals, 
+dds_d0_obese <- dds_d0_obese[keep_d0_obese, ]
+
+dds_d0_nonobese <- estimateSizeFactors(dds_d0_nonobese)
+keep_d0_nonobese <- rowSums(counts(dds_d0_nonobese, normalized = TRUE) >= 10 ) >= 68 # I'm filtering for genes that have >10 counts in 90% of the individuals, 
+dds_d0_nonobese <- dds_d0_nonobese[keep_d0_nonobese, ]
+
+dds_d3_obese <- estimateSizeFactors(dds_d3_obese)
+keep_d3_obese <- rowSums(counts(dds_d3_obese, normalized = TRUE) >= 10 ) >= 44 # I'm filtering for genes that have >10 counts in 90% of the individuals, 
+dds_d3_obese <- dds_d3_obese[keep_d3_obese, ]
+
+dds_d3_nonobese <- estimateSizeFactors(dds_d3_nonobese)
+keep_d3_nonobese <- rowSums(counts(dds_d3_nonobese, normalized = TRUE) >= 10 ) >= 68 # I'm filtering for genes that have >10 counts in 90% of the individuals, 
+dds_d3_nonobese <- dds_d3_nonobese[keep_d3_nonobese, ]
+
+dds_d7_obese <- estimateSizeFactors(dds_d7_obese)
+keep_d7_obese <- rowSums(counts(dds_d7_obese, normalized = TRUE) >= 10 ) >= 44 # I'm filtering for genes that have >10 counts in 90% of the individuals, 
+dds_d7_obese <- dds_d7_obese[keep_d7_obese, ]
+
+dds_d7_nonobese <- estimateSizeFactors(dds_d7_nonobese)
+keep_d7_nonobese <- rowSums(counts(dds_d7_nonobese, normalized = TRUE) >= 10 ) >= 68 # I'm filtering for genes that have >10 counts in 90% of the individuals, 
+dds_d7_nonobese <- dds_d7_nonobese[keep_d7_nonobese, ]
+
+dds_d28_obese <- estimateSizeFactors(dds_d28_obese)
+keep_d28_obese <- rowSums(counts(dds_d28_obese, normalized = TRUE) >= 10 ) >= 44 # I'm filtering for genes that have >10 counts in 90% of the individuals, 
+dds_d28_obese <- dds_d28_obese[keep_d28_obese, ]
+
+dds_d28_nonobese <- estimateSizeFactors(dds_d28_nonobese)
+keep_d28_nonobese <- rowSums(counts(dds_d28_nonobese, normalized = TRUE) >= 10 ) >= 68 # I'm filtering for genes that have >10 counts in 90% of the individuals, 
+dds_d28_nonobese <- dds_d28_nonobese[keep_d28_nonobese, ]
+
+dds_d0_obese <- DESeq(dds_d0_obese)
+dds_d0_nonobese <- DESeq(dds_d0_nonobese)
+
+dds_d3_obese <- DESeq(dds_d3_obese)
+dds_d3_nonobese <- DESeq(dds_d3_nonobese)
+
+dds_d7_obese <- DESeq(dds_d7_obese)
+dds_d7_nonobese <- DESeq(dds_d7_nonobese)
+
+dds_d28_obese <- DESeq(dds_d28_obese)
+dds_d28_nonobese <- DESeq(dds_d28_nonobese)
+
+res_d0_obese <- lfcShrink(dds_d0_obese, coef =  "Serology_High.Responder_vs_Non.Responder")
+res_d0_nonobese <- lfcShrink(dds_d0_nonobese, coef =  "Serology_High.Responder_vs_Non.Responder")
+
+res_d3_obese <- lfcShrink(dds_d3_obese, coef =  "Serology_High.Responder_vs_Non.Responder")
+res_d3_nonobese <- lfcShrink(dds_d3_nonobese, coef =  "Serology_High.Responder_vs_Non.Responder")
+
+res_d7_obese <- lfcShrink(dds_d7_obese, coef = "Serology_High.Responder_vs_Non.Responder")
+res_d7_nonobese <- lfcShrink(dds_d7_nonobese, coef =  "Serology_High.Responder_vs_Non.Responder")
+
+res_d28_obese <- lfcShrink(dds_d28_obese, coef =  "Serology_High.Responder_vs_Non.Responder")
+res_d28_nonobese <- lfcShrink(dds_d28_nonobese, coef =  "Serology_High.Responder_vs_Non.Responder")
+
+sig_d28_obese <- res_d28_obese %>%
+              data.frame() %>%
+              tibble::rownames_to_column(var = "gene") %>%
+              as_tibble() %>%
+              filter(padj < 0.05) %>%
+              mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_d28_nonobese <- res_d28_nonobese %>%
+              data.frame() %>%
+              tibble::rownames_to_column(var = "gene") %>%
+              as_tibble() %>%
+              filter(padj < 0.05) %>%
+              mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_d7_obese <- res_d7_obese %>%
+              data.frame() %>%
+              tibble::rownames_to_column(var = "gene") %>%
+              as_tibble() %>%
+              filter(padj < 0.05) %>%
+              mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_d7_nonobese <- res_d7_nonobese %>%
+              data.frame() %>%
+              tibble::rownames_to_column(var = "gene") %>%
+              as_tibble() %>%
+              filter(padj < 0.05) %>%
+              mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_d3_obese <- res_d3_obese %>%
+              data.frame() %>%
+              tibble::rownames_to_column(var = "gene") %>%
+              as_tibble() %>%
+              filter(padj < 0.05) %>%
+              mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_d3_nonobese <- res_d3_nonobese %>%
+              data.frame() %>%
+              tibble::rownames_to_column(var = "gene") %>%
+              as_tibble() %>%
+              filter(padj < 0.05) %>%
+              mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_d0_obese <- res_d0_obese %>%
+              data.frame() %>%
+              tibble::rownames_to_column(var = "gene") %>%
+              as_tibble() %>%
+              filter(padj < 0.05) %>%
+              mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_d0_nonobese <- res_d0_nonobese %>%
+              data.frame() %>%
+              tibble::rownames_to_column(var = "gene") %>%
+              as_tibble() %>%
+              filter(padj < 0.05) %>%
+              mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+```
+
+# Generate a table of all DEGenes for supplement
+```{r}
+allgenes <- rbind(sig_d0_nonobese %>% mutate(Day = 0, BMI = "Nonobese"),
+                  sig_d0_obese %>% mutate(Day = 0, BMI = "Obese"),
+                  sig_d3_nonobese %>% mutate(Day = 3, BMI = "Nonobese"),
+                  sig_d3_obese %>% mutate(Day = 3, BMI = "Obese"),
+                  sig_d7_nonobese %>% mutate(Day = 7, BMI = "Nonobese"),
+                  sig_d7_obese %>% mutate(Day = 7, BMI = "Obese"),
+                  sig_d28_nonobese %>% mutate(Day = 28, BMI = "Nonobese"),
+                  sig_d28_obese %>% mutate(Day = 28, BMI = "Obese"))
+
+write.csv(allgenes, "./Scripts/Supplement/Supplemental_Table_5.csv")
+```
+
+# Prep Data for Enrichment Analysis
+* Generate lists of genes for enrichment analyses (KEGG for Reactome)
+```{r}
+make_genelist <- function(results, KEGG = FALSE) {
+  if(KEGG){
+    list <- results$log2FoldChange
+    names(list) <- rownames(results)
+    names(list) <- genenames$entrezgene_id[match(names(list), genenames$ensembl_gene_id)]
+  } else {
+  list <- results$log2FoldChange
+  names(list) <- rownames(results)
+  }
+  list <- sort(list, decreasing = TRUE)
+    return(list)
+}
+
+genes_d0_obese <- make_genelist(res_d0_obese)
+genes_d0_nonobese <- make_genelist(res_d0_nonobese)
+genes_d0_obese_kegg <- make_genelist(res_d0_obese, KEGG = TRUE)
+genes_d0_nonobese_kegg <- make_genelist(res_d0_nonobese, KEGG = TRUE)
+genes_d0_obese_kegg <- genes_d0_obese_kegg[!is.na(names(genes_d0_obese_kegg))]
+genes_d0_nonobese_kegg <- genes_d0_nonobese_kegg[!is.na(names(genes_d0_nonobese_kegg))]
+genes_d0_obese_kegg <- genes_d0_obese_kegg[!duplicated(names(genes_d0_obese_kegg))]
+genes_d0_nonobese_kegg <- genes_d0_nonobese_kegg[!duplicated(names(genes_d0_nonobese_kegg))]
+
+genes_d3_obese <- make_genelist(res_d3_obese)
+genes_d3_nonobese <- make_genelist(res_d3_nonobese)
+genes_d3_obese_kegg <- make_genelist(res_d3_obese, KEGG = TRUE)
+genes_d3_nonobese_kegg <- make_genelist(res_d3_nonobese, KEGG = TRUE)
+genes_d3_obese_kegg <- genes_d3_obese_kegg[!is.na(names(genes_d3_obese_kegg))]
+genes_d3_nonobese_kegg <- genes_d3_nonobese_kegg[!is.na(names(genes_d3_nonobese_kegg))]
+genes_d3_obese_kegg <- genes_d3_obese_kegg[!duplicated(names(genes_d3_obese_kegg))]
+genes_d3_nonobese_kegg <- genes_d3_nonobese_kegg[!duplicated(names(genes_d3_nonobese_kegg))]
+
+genes_d7_obese <- make_genelist(res_d7_obese)
+genes_d7_nonobese <- make_genelist(res_d7_nonobese)
+genes_d7_obese_kegg <- make_genelist(res_d7_obese, KEGG = TRUE)
+genes_d7_nonobese_kegg <- make_genelist(res_d7_nonobese, KEGG = TRUE)
+genes_d7_obese_kegg <- genes_d7_obese_kegg[!is.na(names(genes_d7_obese_kegg))]
+genes_d7_nonobese_kegg <- genes_d7_nonobese_kegg[!is.na(names(genes_d7_nonobese_kegg))]
+genes_d7_obese_kegg <- genes_d7_obese_kegg[!duplicated(names(genes_d7_obese_kegg))]
+genes_d7_nonobese_kegg <- genes_d7_nonobese_kegg[!duplicated(names(genes_d7_nonobese_kegg))]
+
+genes_d28_obese <- make_genelist(res_d28_obese)
+genes_d28_nonobese <- make_genelist(res_d28_nonobese)
+genes_d28_obese_kegg <- make_genelist(res_d28_obese, KEGG = TRUE)
+genes_d28_nonobese_kegg <- make_genelist(res_d28_nonobese, KEGG = TRUE)
+genes_d28_obese_kegg <- genes_d28_obese_kegg[!is.na(names(genes_d28_obese_kegg))]
+genes_d28_nonobese_kegg <- genes_d28_nonobese_kegg[!is.na(names(genes_d28_nonobese_kegg))]
+genes_d28_obese_kegg <- genes_d28_obese_kegg[!duplicated(names(genes_d28_obese_kegg))]
+genes_d28_nonobese_kegg <- genes_d28_nonobese_kegg[!duplicated(names(genes_d28_nonobese_kegg))]
+```
+
+# Perform enrichment analysis
+* Sets seed for consistency of results
+* Pvaluecutoff is set so high so I can compare across days, when terms are/are not significant
+* Makes a table of all enriched terms for supplement
+```{r}
+set.seed(139)
+enrichment_d0_obese <- gseGO(genes_d0_obese, 
+                    "org.Hs.eg.db",
+                    ont = "ALL",
+                    keyType = "ENSEMBL",
+                    pvalueCutoff = 0.999999,
+                    #pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    eps = 0,
+                    seed = TRUE)
+
+
+enrichment_d0_nonobese <- gseGO(genes_d0_nonobese, 
+                    "org.Hs.eg.db",
+                    ont = "ALL",
+                    keyType = "ENSEMBL",
+                    pvalueCutoff = 0.999999,
+                    #pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    minGSSize = 10,
+                    maxGSSize = 500, 
+                    eps = 0,
+                    seed = TRUE)
+
+enrichment_d3_obese <- gseGO(genes_d3_obese, 
+                    "org.Hs.eg.db",
+                    ont = "ALL",
+                    keyType = "ENSEMBL",
+                    pvalueCutoff = 0.999999,
+                    #pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    eps = 0,
+                    seed = TRUE)
+
+enrichment_d3_nonobese <- gseGO(genes_d3_nonobese, 
+                    "org.Hs.eg.db",
+                    ont = "ALL",
+                    keyType = "ENSEMBL",
+                    pvalueCutoff = 0.999999,
+                    #pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    eps = 0,
+                    seed = TRUE)
+
+enrichment_d7_obese <- gseGO(genes_d7_obese, 
+                    "org.Hs.eg.db",
+                    ont = "ALL",
+                    keyType = "ENSEMBL",
+                    pvalueCutoff = 0.999999,
+                    #pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    eps = 0,
+                    seed = TRUE)
+
+enrichment_d7_nonobese <- gseGO(genes_d7_nonobese, 
+                    "org.Hs.eg.db",
+                    ont = "ALL",
+                    keyType = "ENSEMBL",
+                    pvalueCutoff = 0.999999,
+                    #pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    eps = 0,
+                    seed = TRUE)
+
+enrichment_d28_obese <- gseGO(genes_d28_obese, 
+                    "org.Hs.eg.db",
+                    ont = "ALL",
+                    keyType = "ENSEMBL",
+                    pvalueCutoff = 0.999999,
+                    #pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    eps = 0,
+                    seed = TRUE)
+
+enrichment_d28_nonobese <- gseGO(genes_d28_nonobese, 
+                    "org.Hs.eg.db",
+                    ont = "ALL",
+                    keyType = "ENSEMBL",
+                    pvalueCutoff = 0.999999,
+                    #pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    eps = 0,
+                    seed = TRUE)
+
+
+
+all_d0 <- rbind(enrichment_d0_obese@result %>% mutate(BMI = "Obese") %>% mutate(Day = 0),
+                enrichment_d0_nonobese@result %>% mutate(BMI = "Non-Obese")%>% mutate(Day = 0))
+
+all_d3 <- rbind(enrichment_d3_obese@result %>% mutate(BMI = "Obese") %>% mutate(Day = 3),
+                enrichment_d3_nonobese@result %>% mutate(BMI = "Non-Obese") %>% mutate(Day = 3))
+
+all_d7<- rbind(enrichment_d7_obese@result %>% mutate(BMI = "Obese") %>% mutate(Day = 7),
+                enrichment_d7_nonobese@result %>% mutate(BMI = "Non-Obese") %>% mutate(Day = 7))
+
+all_d28<- rbind(enrichment_d28_obese@result %>% mutate(BMI = "Obese") %>% mutate(Day = 28),
+                enrichment_d28_nonobese@result %>% mutate(BMI = "Non-Obese") %>% mutate(Day = 28))
+
+all_go <- rbind(all_d0, all_d3, all_d7, all_d28)
+```
+
+# Perform Reactome enrichment analysis
+```{r}
+set.seed(139)
+d0_nonobese_reactome <- gsePathway(genes_d0_nonobese_kegg,
+                pvalueCutoff = 0.999999,
+                pAdjustMethod = "BH",
+                verbose = FALSE,
+                eps = 0,
+                seed = TRUE)@result
+
+d0_obese_reactome <- gsePathway(genes_d0_obese_kegg,
+                pvalueCutoff = 0.999999,
+                pAdjustMethod = "BH",
+                eps = 0,
+                verbose = FALSE)@result
+
+d3_nonobese_reactome <- gsePathway(genes_d3_nonobese_kegg,
+                pvalueCutoff = 0.999999,
+                pAdjustMethod = "BH",
+                eps = 0,
+                verbose = FALSE)@result
+
+d3_obese_reactome <- gsePathway(genes_d3_obese_kegg,
+                pvalueCutoff = 0.999999,
+                pAdjustMethod = "BH",
+                eps = 0,
+                verbose = FALSE)@result
+
+d7_nonobese_reactome <- gsePathway(genes_d7_nonobese_kegg,
+                pvalueCutoff = 0.999999,
+                pAdjustMethod = "BH",
+                eps = 0,
+                verbose = FALSE)@result
+
+d7_obese_reactome <- gsePathway(genes_d7_obese_kegg,
+                pvalueCutoff = 0.999999,
+                pAdjustMethod = "BH",
+                eps = 0,
+                verbose = FALSE)@result
+
+d28_nonobese_reactome <- gsePathway(genes_d28_nonobese_kegg,
+                pvalueCutoff = 0.999999,
+                pAdjustMethod = "BH",
+                eps = 0,
+                verbose = FALSE)@result
+
+d28_obese_reactome <- gsePathway(genes_d28_obese_kegg,
+                pvalueCutoff = 0.999999,
+                pAdjustMethod = "BH",
+                eps = 0,
+                verbose = FALSE)@result
+
+all_d0_reactome <- rbind(d0_obese_reactome %>% mutate(BMI = "Obese") %>% mutate(Day = 0),
+                d0_nonobese_reactome %>% mutate(BMI = "Non-Obese") %>% mutate(Day = 0))
+
+all_d3_reactome <- rbind(d3_obese_reactome %>% mutate(BMI = "Obese") %>% mutate(Day = 3),
+                d3_nonobese_reactome %>% mutate(BMI = "Non-Obese") %>% mutate(Day = 3))
+
+all_d7_reactome <- rbind(d7_obese_reactome %>% mutate(BMI = "Obese") %>% mutate(Day = 7),
+                d7_nonobese_reactome %>% mutate(BMI = "Non-Obese") %>% mutate(Day = 7))
+
+all_d28_reactome <- rbind(d28_obese_reactome %>% mutate(BMI = "Obese") %>% mutate(Day = 28),
+                d28_nonobese_reactome %>% mutate(BMI = "Non-Obese") %>% mutate(Day = 28))
+
+all_reactome <- rbind(all_d0_reactome, all_d3_reactome, all_d7_reactome, all_d28_reactome)
+```
+
+# Figure 4A: Enrichment
+* Generates a table of curated gene sets and plots these sets
+```{r}
+sig_sets <- rbind(all_go,
+                  all_reactome %>% mutate(ONTOLOGY = NA)) %>% 
+  group_by(ID) %>%
+  mutate(n = matrixStats::count(p.adjust < 0.05)) %>%
+  ungroup() %>%
+  filter(ONTOLOGY %in% c(NA, "BP")) %>% 
+  filter(n >= 2) %>%
+  mutate(Signif = ifelse(p.adjust < 0.05, "*", ""))
+
+
+sets_to_plot <- c("GO:0002218", "GO:0030036", "GO:0002250", "GO:0050851", "GO:0019221", "GO:0002377", "GO:0002758", "GO:0032635", "GO:0002449", "GO:0000165", "GO:0030099", "R-HSA-6798695", "GO:0002221", "R-HSA-76002", "GO:0045089", "R-HSA-168898", "R-HSA-202430")
+
+png("./Figures/Fig4/Fig4A_Enrichment.png", height = 1500, width = 2000, res = 300, units = "px")
+ggplot(data = sig_sets %>% filter(ID %in% sets_to_plot), aes(x = factor(Day), y = Description, fill = NES)) +
+  geom_tile() +
+  geom_text(aes(label = Signif)) +
+  labs(x = "Day", y = "") +
+  facet_grid(.~BMI) +
+  scale_fill_gradient2() +
+  theme_classic()
+dev.off()
+
+pdf("./Figures/Fig4/Fig4A_Enrichment.pdf")
+ggplot(data = sig_sets %>% filter(ID %in% sets_to_plot), aes(x = factor(Day), y = Description, fill = NES)) +
+  geom_tile() +
+  geom_text(aes(label = Signif)) +
+  labs(x = "Day", y = "") +
+  facet_grid(.~BMI) +
+  scale_fill_gradient2() +
+  theme_classic()
+dev.off()
+```
+# Export significant gene sets for supplement
+```{r}
+all_sets <- rbind(all_go,
+                  all_reactome %>% mutate(ONTOLOGY = NA))
+
+write.csv(all_sets, "./Scripts/Supplement/Supplemental_Table_6.csv")
+```
+
+# Plot individual gene profiles
+* Plots individual gene trends on different study days, using genes that are in the enriched sets from Figure 4A
+```{r}
+genes_for_fig <- c("ENSG00000163563", "ENSG00000116701", "ENSG00000182866", "ENSG00000126353", "ENSG00000139193", "ENSG00000137078", "ENSG00000115085", "ENSG00000213658", "ENSG00000104312", "ENSG00000101916")
+
+figure_tpm_plots <- list()
+figure_tpm_plots_categorical <- list()
+
+for(i in 1:length(genes_for_fig)){
+        plot_df <- data.frame(t(UGA4_longitudinal_tpm_hemo_removed[rownames(UGA4_longitudinal_tpm_hemo_removed) %in% genes_for_fig[[i]], ]))
+        colnames(plot_df) <- genes_for_fig[[i]]
+        plot_df$Serology <- log2(UGA4_longitudinal_metadata$vax_strain_seroconversion[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))])
+        plot_df$BMI <- UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+        plot_df$Day <- UGA4_longitudinal_metadata$Day[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+        plot_df$ID <- UGA4_longitudinal_metadata$ID[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+        plot_df$Serology_Categorical <- UGA4_longitudinal_metadata$Serology[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+    
+      figure_tpm_plots[[i]] <- ggplot(data = plot_df, aes(x = !!plot_df[,2], y = !!plot_df[,1], color = !!plot_df[,3], group = !!plot_df[,3])) +
+            geom_point(position = position_jitterdodge()) +
+        #geom_boxplot() +
+         geom_smooth(method = "lm") +
+         scale_color_manual(values = c("#289F90", "#EAC36F"), name = "BMI") +
+            #scale_color_paletteer_d("nationalparkcolors::SmokyMountains", name = "BMI") +
+            labs(title = genenames$hgnc_symbol[match(colnames(plot_df)[[1]], genenames$ensembl_gene_id)], x = "log2(Seroconversion)", y = "TPM") +
+          scale_y_log10() +
+            theme_bw() +
+          facet_grid(.~Day) +
+        theme(axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    axis.title = element_text(size = 20),
+    strip.text = element_text(size = 17),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 15),
+    title = element_text(size = 15),
+    aspect.ratio = 1,
+    strip.background = element_blank(),
+    text = element_text(family = "Helvetica"))
+      
+      plot_df_subset <- plot_df %>% filter(Serology_Categorical %in% c("High Responder", "Non Responder"))
+      
+    figure_tpm_plots_categorical[[i]] <- ggplot(data = plot_df_subset, aes(x = !!plot_df_subset[,3], y = !!plot_df_subset[,1], color = !!plot_df_subset[,6])) +
+            geom_boxplot() +
+            geom_point(position = position_jitterdodge()) +
+            scale_color_manual(values = c("#601A4A", "#63ACBE"), name = "Vaccine Response") +
+            labs(title = genenames$hgnc_symbol[match(colnames(plot_df)[[1]], genenames$ensembl_gene_id)], x = "", y = "TPM") +
+            scale_y_log10() +
+            theme_bw() +
+            facet_grid(.~Day) +
+            theme(axis.text.y = element_text(size = 15),
+                  axis.text.x = element_text(size = 15, angle = 45, hjust=1),
+                  axis.title = element_text(size = 20),
+    strip.text = element_text(size = 17),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 15),
+    title = element_text(size = 15),
+    aspect.ratio = 1,
+    strip.background = element_blank(),
+    text = element_text(family = "Helvetica"))
+}
+
+gene_fig_names <- genenames$hgnc_symbol[match(genes_for_fig, genenames$ensembl_gene_id)]
+
+for(i in 1:length(figure_tpm_plots_categorical)){
+  png(filename = paste0("./Figures/Fig4/",gene_fig_names[[i]], "_tpm_categorical.png"), height = 1400, width = 4000, res = 300, units = "px")
+  print(figure_tpm_plots_categorical[[i]])
+  dev.off()
+}
+
+for(i in 1:length(figure_tpm_plots_categorical)){
+  pdf(filename = paste0("./Figures/Fig4/",gene_fig_names[[i]], "_tpm_categorical.pdf"))
+  figure_tpm_plots_categorical[[i]]
+  dev.off()
+}
+
+pdf("./Figures/Fig4/Fig4A_ZAP70_TPM_categorical.pdf", height = 5, width = 12)
+figure_tpm_plots_categorical[[7]]
+dev.off()
+
+pdf("./Figures/Fig4/Fig4A_TLR8_TPM_categorical.pdf", height = 5, width = 12)
+figure_tpm_plots_categorical[[10]]
+dev.off()
+
+pdf("./Figures/Fig4/Fig4A_LAT_TPM_categorical.pdf", height = 5, width = 12)
+figure_tpm_plots_categorical[[8]]
+dev.off()
+
+for(i in 1:length(figure_tpm_plots)){
+  png(filename = paste0("./Figures/Fig4/",gene_fig_names[[i]], "_tpm.png"), height = 1400, width = 4000, res = 300, units = "px")
+  print(figure_tpm_plots_categorical[[i]])
+  dev.off()
+}
+```
+
+
+###DEPRECATED AS OF 07JUN2024
+```{r}
+reactome <- c("R-HSA-6798695")
+go <- c("GO:0002250", "GO:0045061")
+
+reactome_selected <- all_reactome %>%
+  filter(ID %in% reactome) %>%
+  mutate(signif = ifelse(p.adjust < 0.05, "Significant", "Non-Significant")) %>%
+  mutate(method = "Reactome")
+
+go_selected <- all_go %>%
+  filter(ID %in% go) %>%
+  mutate(signif = ifelse(p.adjust < 0.05, "Significant", "Non-Significant")) %>%
+  mutate(method = "Reactome")
+
+
+
+all_pathways <- rbind(reactome_selected, go_selected[,-1]) %>%
+  mutate(BMI_Signif = paste0(.$BMI, ", ", .$signif))
+
+png("./Figures/Fig4/Fig4A_Enrichment.png", height = 3200, width = 2200, res = 300, units = "px")
+ggplot(data = all_pathways, aes(x = as.factor(Day), y = NES, group = BMI)) +
+  geom_line() +
+  geom_point(size = 5, aes(shape = BMI_Signif, color = ifelse(signif == "Significant", as.numeric(p.adjust), NA))) +
+ # geom_text(aes(label = ifelse(signif == "Significant", "*", "")), 
+ #           position = position_dodge(width = .9), vjust = -.1, size = 20 / .pt) +
+  scale_color_gradientn(colors = c("#0a3a2a", "#92ddc8"), name = "Adjusted\nP Value") +
+  scale_shape_manual(values = c(2, 17, 1, 16), name = "BMI Category") +
+  labs(x = "Day", y = "Normalized Enrichment Score") +
+  facet_wrap(~Description, strip.position = "top", nrow = 5) +
+  ylim(c(-4, 4)) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        strip.text = element_text(size = 15),
+        axis.text = element_text(size = 15),
+        axis.title = element_text(size = 20),
+        legend.text = element_text(size = 15),
+        legend.title = element_text(size = 18))
+dev.off() 
+```
+
+# Genes for the Figure
+```{r}
+genes_for_fig <- c("ENSG00000163563", "ENSG00000116701", "ENSG00000182866", "ENSG00000126353", "ENSG00000139193", "ENSG00000137078", "ENSG00000115085", "ENSG00000213658")
+
+figure_tpm_plots <- list()
+
+for(i in 1:length(genes_for_fig)){
+        plot_df <- data.frame(t(UGA4_longitudinal_tpm_hemo_removed[rownames(UGA4_longitudinal_tpm_hemo_removed) %in% genes_for_fig[[i]], ]))
+        colnames(plot_df) <- genes_for_fig[[i]]
+        plot_df$Serology <- log2(UGA4_longitudinal_metadata$vax_strain_seroconversion[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))])
+        plot_df$BMI <- UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+                plot_df$Day <- UGA4_longitudinal_metadata$Day[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+        plot_df$ID <- UGA4_longitudinal_metadata$ID[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+        
+        #plot_df <- plot_df %>% filter(Serology %in% c("High Responder", "Non Responder"))
+    
+      figure_tpm_plots[[i]] <- ggplot(data = plot_df, aes(x = !!plot_df[,2], y = !!plot_df[,1], color = !!plot_df[,3], group = !!plot_df[,3])) +
+            geom_point(position = position_jitterdodge()) +
+        #geom_boxplot() +
+         geom_smooth(method = "lm") +
+         scale_color_manual(values = c("#638475", "#735D78"), name = "BMI") +
+            #scale_color_paletteer_d("nationalparkcolors::SmokyMountains", name = "BMI") +
+            labs(title = genenames$hgnc_symbol[match(colnames(plot_df)[[1]], genenames$ensembl_gene_id)], x = "log2(Seroconversion)", y = "TPM") +
+          scale_y_log10() +
+            theme_bw() +
+          facet_grid(.~Day) +
+        theme(axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    axis.title = element_text(size = 20),
+    strip.text = element_text(size = 17),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 15),
+    title = element_text(size = 15),
+    aspect.ratio = 1,
+    strip.background = element_blank())
+}
+
+png("./Figures/Fig4/mnda_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+figure_tpm_plots[[1]]
+dev.off()
+
+png("./Figures/Fig4/ncf2_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+figure_tpm_plots[[2]]
+dev.off()
+
+png("./Figures/Fig4/lck_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+figure_tpm_plots[[3]]
+dev.off()
+
+png("./Figures/Fig4/ccr7_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+figure_tpm_plots[[4]]
+dev.off()
+
+png("./Figures/Fig4/cd27_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+figure_tpm_plots[[5]]
+dev.off()
+
+png("./Figures/Fig4/sit1_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+figure_tpm_plots[[6]]
+dev.off()
+
+png("./Figures/Fig4/zap70_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+figure_tpm_plots[[7]]
+dev.off()
+
+png("./Figures/Fig4/lat_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+figure_tpm_plots[[8]]
+dev.off()
+```

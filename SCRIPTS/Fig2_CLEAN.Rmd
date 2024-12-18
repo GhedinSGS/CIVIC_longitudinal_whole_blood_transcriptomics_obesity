@@ -1,0 +1,733 @@
+---
+title: "Figure 2: Differential Expression and Obesity"
+output: html_notebook
+---
+```{r}
+library(DESeq2)
+library(dplyr)
+library(biomaRt)
+library(DEGreport)
+library(ggplot2)
+library(clusterProfiler)
+library(ggpubr)
+library(UpSetR)
+library(cowplot)
+library(tidyr)
+library(ComplexHeatmap)
+library(paletteer)
+library(ggpmisc)
+library(ReactomePA)
+```
+
+# Set working directory
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "/Users/hockmanmr/OneDrive - National Institutes of Health/LAB_STUFF/PEOPLE/meg/manuscripts/CIVIC Longitudinal Transcriptomics")
+```
+
+# Step 1: Import Data
+Remember to set the appropriate working directory. The .RData file here was generated using "Data Wrangling" and "Preprocessing Scripts"
+```{r}
+load("./Scripts/Data/Publication/Longitudinal_complete_data.RData")
+colfunc <- colorRampPalette(c("#832424", "white", "#3A3A98"))
+```
+
+## Set up Metadata
+* Set "Day" as a factor - I want DESeq to consider nonlinear patterns in expression
+* Add a bivariate, categorical classification for BMI, and make it a factor
+* Set metadata rownames for downstream analyses
+* Center BMI, seroconversion score, and age for DESeq
+* Generate a table of different gene identifiers
+```{r}
+UGA4_longitudinal_metadata$Day <- factor(UGA4_longitudinal_metadata$Day)
+UGA4_longitudinal_metadata$BMI_Bivariate <- ifelse(UGA4_longitudinal_metadata$BMI < 30, "Non_Obese",
+                                                   "Obese")
+UGA4_longitudinal_metadata$BMI_Bivariate <- factor(UGA4_longitudinal_metadata$BMI_Bivariate, levels = c("Non_Obese", "Obese"))
+
+rownames(UGA4_longitudinal_metadata) <- paste0(UGA4_longitudinal_metadata$ID, "_", UGA4_longitudinal_metadata$Day)
+
+UGA4_longitudinal_metadata$BMI_centered <- scale(UGA4_longitudinal_metadata$BMI, center = TRUE)
+UGA4_longitudinal_metadata$seroconversion_centered <- scale(UGA4_longitudinal_metadata$vax_strain_seroconversion, center = TRUE)
+UGA4_longitudinal_metadata$Age_centered <- scale(UGA4_longitudinal_metadata$Age, center = TRUE)
+
+mart <- useEnsembl(biomart = "ensembl", "hsapiens_gene_ensembl")#, mirror = "useast")
+geneids <- rownames(UGA4_longitudinal_counts_hemo_removed)
+genenames <- as.data.frame(getBM(filters = "ensembl_gene_id",
+                                 attributes = c("ensembl_gene_id", "hgnc_symbol", "entrezgene_id"),
+                                 values = geneids,
+                                 mart = mart))
+```
+
+## Set deseq import function
+* Makes a function to make deseq objects from data, checks to make sure that the count colnames are equal to the metadata rownames, a requirement for deseq. Designed to be flexible when considering single day or multi-day data.
+```{r}
+deseq_import <- function(counts, metadata, design_setting = ~1) {
+  ifelse(length(unique(metadata$Day)) > 1,
+  rownames(metadata) <- paste0(metadata$ID, "_", metadata$Day),
+  rownames(metadata) <- metadata$ID)
+
+  if (all(rownames(metadata) == colnames(counts))) {
+    object <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(counts)),
+      colData = metadata,
+      design = design_setting)} else {
+    "names not equal"
+  }
+  return(object)
+}
+```
+
+## Divide data by day
+* Divide data by days for analysis on individual days
+```{r}
+# Divide Day 0 Data
+Day0_metadata <- UGA4_longitudinal_metadata %>% filter(Day == 0)
+Day0_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(Day0_metadata)]
+
+# Divide Day 3 Data
+Day3_metadata <- UGA4_longitudinal_metadata %>% filter(Day == 3)
+Day3_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(Day3_metadata)]
+Day3_tpm <- UGA4_longitudinal_tpm_hemo_removed[colnames(UGA4_longitudinal_tpm_hemo_removed) %in% rownames(Day3_metadata)]
+
+# Divide Day 7 Data
+Day7_metadata <- UGA4_longitudinal_metadata %>% filter(Day == 7)
+Day7_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(Day7_metadata)]
+Day7_tpm <- UGA4_longitudinal_tpm_hemo_removed[colnames(UGA4_longitudinal_tpm_hemo_removed) %in% rownames(Day7_metadata)]
+
+# Divide Day 28 Data
+Day28_metadata <- UGA4_longitudinal_metadata %>% filter(Day == 28)
+Day28_counts <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(Day28_metadata)]
+Day28_tpm <- UGA4_longitudinal_tpm_hemo_removed[colnames(UGA4_longitudinal_tpm_hemo_removed) %in% rownames(Day28_metadata)]
+```
+
+# Differential Expression by BMI
+* Performs differential expression analysis with respect to BMI (BMI_centered)
+* Keep only rows that have a count of at least 10 in the smallest group considered.
+* Apply lfcshrink using the BMI variable.
+* Pull out differentially expressed genes
+```{r}
+dds_d0 <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(Day0_counts)),
+      colData = Day0_metadata,
+      design = ~ BMI_centered + Gender + Age_centered)
+
+dds_d3 <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(Day3_counts)),
+      colData = Day3_metadata,
+      design = ~ BMI_centered + Gender + Age_centered)
+
+dds_d7 <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(Day7_counts)),
+      colData = Day7_metadata,
+      design = ~ BMI_centered + Gender + Age_centered)
+
+dds_d28 <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(Day28_counts)),
+      colData = Day28_metadata,
+      design = ~ BMI_centered + Gender + Age_centered)
+
+dds_d0 <- estimateSizeFactors(dds_d0)
+keep_d0 <- rowSums(counts(dds_d0, normalized = TRUE) >= 10 ) >= 60
+dds_d0 <- dds_d0[keep_d0, ]
+
+dds_d3 <- estimateSizeFactors(dds_d3)
+keep_d3 <- rowSums(counts(dds_d3, normalized = TRUE) >= 10 ) >= 60
+dds_d3 <- dds_d3[keep_d3, ]
+
+dds_d7 <- estimateSizeFactors(dds_d7)
+keep_d7 <- rowSums(counts(dds_d7, normalized = TRUE) >= 10 ) >= 60
+dds_d7 <- dds_d7[keep_d7, ]
+
+dds_d28 <- estimateSizeFactors(dds_d28)
+keep_d28 <- rowSums(counts(dds_d28, normalized = TRUE) >= 10 ) >= 60
+dds_d28 <- dds_d28[keep_d28, ]
+
+dds_d0 <- DESeq(dds_d0)
+
+dds_d3 <- DESeq(dds_d3)
+
+dds_d7 <- DESeq(dds_d7)
+
+dds_d28 <- DESeq(dds_d28)
+
+res_d0 <- lfcShrink(dds_d0, coef =  "BMI_centered")
+res_d3<- lfcShrink(dds_d3, coef =  "BMI_centered")
+res_d7 <- lfcShrink(dds_d7, coef = "BMI_centered")
+res_d28 <- lfcShrink(dds_d28, coef =  "BMI_centered")
+
+sig_d28 <- res_d28 %>%
+              data.frame() %>%
+              tibble::rownames_to_column(var = "gene") %>%
+              as_tibble() %>%
+              filter(padj < 0.05) %>%
+              mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_d7 <- res_d7 %>%
+              data.frame() %>%
+              tibble::rownames_to_column(var = "gene") %>%
+              as_tibble() %>%
+              filter(padj < 0.05) %>%
+              mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_d3 <- res_d3 %>%
+              data.frame() %>%
+              tibble::rownames_to_column(var = "gene") %>%
+              as_tibble() %>%
+              filter(padj < 0.05) %>%
+              mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_d0 <- res_d0 %>%
+              data.frame() %>%
+              tibble::rownames_to_column(var = "gene") %>%
+              as_tibble() %>%
+              filter(padj < 0.05) %>%
+              mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+```
+
+#Figure 2A
+Generate an upset plot of DEGenes on each study day
+```{r}
+genes <- list("Day 0" = sig_d0$gene,
+              "Day 3" = sig_d3$gene,
+              "Day 7" = sig_d7$gene,
+              "Day 28" = sig_d28$gene)
+png("./Figures/Fig2/Fig2A_Obesity_upset.png", height = 1250, width = 2000, res = 300, units = "px")
+upset(fromList(genes[c(4, 3, 2, 1)]),
+      keep.order = TRUE,
+      sets = c("Day 28", "Day 7", "Day 3", "Day 0"),
+      order.by = "freq",
+      sets.x.label = "Number of\nDifferentially Expressed Genes",
+      mainbar.y.label = "Number of Shared Genes",
+      set_size.show = TRUE)
+dev.off()
+
+pdf("./Figures/Fig2/Fig2A_Obesity_upset.pdf", height = 6, width = 8)
+upset(fromList(genes[c(4, 3, 2, 1)]),
+      keep.order = TRUE,
+      sets = c("Day 28", "Day 7", "Day 3", "Day 0"),
+      order.by = "freq",
+      sets.x.label = "Number of\nDifferentially Expressed Genes",
+      mainbar.y.label = "Number of Shared Genes",
+      set_size.show = TRUE)
+dev.off()
+
+genes_with_intersection <- rbind(sig_d0 %>% mutate(Day = 0),
+                                 sig_d3 %>% mutate(Day = 3),
+                                 sig_d7 %>% mutate(Day = 7),
+                                 sig_d28 %>% mutate(Day = 28)) %>%
+  group_by(gene) %>%
+  mutate(count = n()) %>%
+  ungroup() %>%
+  filter(count == 4)
+```
+# Export Differentially Expressed Genes
+* Combine all tables of DEGenes into one and export for supplement
+```{r}
+all_degenes <- rbind(sig_d0 %>% mutate(Day = 0),
+                                 sig_d3 %>% mutate(Day = 3),
+                                 sig_d7 %>% mutate(Day = 7),
+                                 sig_d28 %>% mutate(Day = 28))
+write.csv(all_degenes, "./Scripts/Supplement/Supplemental_Table_2.csv")
+```
+
+# Calculate enrichment per day: Gene lists
+* Generates lists of genes for input into GSEA and Reactome enrichment functions. Removes NA/duplicated names from KEGG lists (used for Reactome)
+```{r}
+make_genelist <- function(results, KEGG = FALSE) {
+  if(KEGG){
+    list <- results$log2FoldChange
+    names(list) <- rownames(results)
+    names(list) <- genenames$entrezgene_id[match(names(list), genenames$ensembl_gene_id)]
+  } else {
+  list <- results$log2FoldChange
+  names(list) <- rownames(results)
+  }
+  list <- sort(list, decreasing = TRUE)
+    return(list)
+}
+
+genes_d0 <- make_genelist(res_d0)
+genes_d0_kegg <- make_genelist(res_d0, KEGG = TRUE)
+genes_d0_kegg <- genes_d0_kegg[!is.na(names(genes_d0_kegg))]
+genes_d0_kegg <- genes_d0_kegg[!duplicated(names(genes_d0_kegg))]
+
+genes_d3 <- make_genelist(res_d3)
+genes_d3_kegg <- make_genelist(res_d3, KEGG = TRUE)
+genes_d3_kegg <- genes_d3_kegg[!is.na(names(genes_d3_kegg))]
+genes_d3_kegg <- genes_d3_kegg[!duplicated(names(genes_d3_kegg))]
+
+
+genes_d7 <- make_genelist(res_d7)
+genes_d7_kegg <- make_genelist(res_d7, KEGG = TRUE)
+genes_d7_kegg <- genes_d7_kegg[!is.na(names(genes_d7_kegg))]
+genes_d7_kegg <- genes_d7_kegg[!duplicated(names(genes_d7_kegg))]
+
+
+genes_d28 <- make_genelist(res_d28)
+genes_d28_kegg <- make_genelist(res_d28, KEGG = TRUE)
+genes_d28_kegg <- genes_d28_kegg[!is.na(names(genes_d28_kegg))]
+genes_d28_kegg <- genes_d28_kegg[!duplicated(names(genes_d28_kegg))]
+```
+
+# Calculate enrichment per day: Enrichment
+* Calculates enriched terms for each study day, using a set seed for consistency of results.
+* Generates a table of all enriched terms
+
+```{r}
+set.seed(139)
+enrichment_d0 <- gseGO(genes_d0, 
+                    "org.Hs.eg.db",
+                    ont = "ALL",
+                    keyType = "ENSEMBL",
+                    #pvalueCutoff = 0.99,
+                    pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    eps = 0,
+                    seed = TRUE)
+
+enrichment_d3 <- gseGO(genes_d3, 
+                    "org.Hs.eg.db",
+                    ont = "ALL",
+                    keyType = "ENSEMBL",
+                    #pvalueCutoff = 0.99,
+                    pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    eps = 0,
+                    seed = TRUE)
+
+enrichment_d7 <- gseGO(genes_d7, 
+                    "org.Hs.eg.db",
+                    ont = "ALL",
+                    keyType = "ENSEMBL",
+                    #pvalueCutoff = 0.99,
+                    pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    eps = 0,
+                    seed = TRUE)
+
+enrichment_d28 <- gseGO(genes_d28, 
+                    "org.Hs.eg.db",
+                    ont = "ALL",
+                    keyType = "ENSEMBL",
+                    #pvalueCutoff = 0.99,
+                    pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    eps = 0,
+                    seed = TRUE)
+
+set.seed(139)
+d0_reactome <- gsePathway(genes_d0_kegg,
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH",
+                verbose = FALSE,
+                eps = 0,
+                seed = TRUE)@result
+
+d3_reactome <- gsePathway(genes_d3_kegg,
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH",
+                verbose = FALSE,
+                eps = 0,
+                seed = TRUE)@result
+
+d7_reactome <- gsePathway(genes_d7_kegg,
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH",
+                verbose = FALSE,
+                eps = 0,
+                seed = TRUE)@result
+
+d28_reactome <- gsePathway(genes_d28_kegg,
+                pvalueCutoff = 0.05,
+                pAdjustMethod = "BH",
+                verbose = FALSE,
+                eps = 0,
+                seed = TRUE)@result
+
+all_go <- rbind(enrichment_d0@result %>% mutate(Day = 0),
+                enrichment_d3@result %>% mutate(Day = 3),
+                enrichment_d7@result %>% mutate(Day = 7),
+                enrichment_d28@result %>% mutate(Day = 28))
+
+all_reactome <- rbind(d0_reactome %>% mutate(Day = 0),
+                      d3_reactome %>% mutate(Day = 3),
+                      d7_reactome %>% mutate(Day = 7),
+                      d28_reactome %>% mutate(Day = 28))
+
+all_terms <- rbind(all_go[, -1],
+                   all_reactome)
+
+```
+
+# Export enrichment terms
+* Generates a csv of all enriched terms for the supplement.
+```{r}
+write.csv(all_terms, "./Scripts/Supplement/Supplemental_Table_3.csv")
+```
+# Figure 2C: Tile Plot of Enriched Terms
+* Plot curated terms in a tile plot.
+```{r}
+terms_to_plot <- c("R-HSA-6798695", "GO:0010818", "GO:0002385", "GO:0071396", "GO:0032607")
+
+sig_sets <- all_terms %>% 
+  group_by(ID) %>%
+  mutate(n = matrixStats::count(p.adjust < 0.05)) %>%
+  ungroup() %>%
+  #filter(ONTOLOGY %in% c(NA, "BP")) %>% 
+  #filter(n >= 2) %>%
+  mutate(Signif = ifelse(p.adjust < 0.05, "*", "")) %>%
+  arrange(n, Description)
+
+
+terms_to_plot <- c("GO:0002237", "GO:0002385", "GO:0002251", "GO:0002227", "GO:0006959", "R-HSA-6798695", "GO:0019814", "GO:0071396", "GO:0042119", "GO:0150076", "GO:0030099", "GO:0061515", "R-HSA-168273", "R-HSA-168255")
+
+png("./Figures/Fig2/Fig2C_enrichment_tile.png", height = 1750, width = 2500, res = 300, units = "px")
+ggplot(data = sig_sets %>% filter(ID %in% terms_to_plot), aes(x = factor(Day), y = Description, fill = NES)) +
+  geom_tile() +
+  geom_text(aes(label = Signif)) +
+  labs(x = "Day", y = "") +
+  scale_fill_gradient2() +
+  theme_classic() +
+  theme(axis.title.x = element_text(size = 15, face = "bold"),
+        axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        element_text(family = "Helvetica"))
+dev.off()
+
+pdf("./Figures/Fig2/Fig2C_enrichment_tile.pdf", height = 6, width = 8)
+ggplot(data = sig_sets %>% filter(ID %in% terms_to_plot), aes(x = factor(Day), y = Description, fill = NES)) +
+  geom_tile() +
+  geom_text(aes(label = Signif)) +
+  labs(x = "Day", y = "") +
+  scale_fill_gradient2() +
+  theme_classic() +
+  theme(axis.title.x = element_text(size = 15, face = "bold"),
+        axis.text.x = element_text(size = 15),
+        axis.text.y = element_text(size = 15),
+        element_text(family = "Helvetica"))
+dev.off()
+```
+
+# Figure 2B: Individual Gene Trends
+* Plots individual genes to show trends of expression as a function of BMI
+```{r}
+genes_of_interest <- c("ENSG00000012223", "ENSG00000239839", "ENSG00000257017")
+tpm_plots_genes_of_interest <- list()
+for(i in 1:length(genes_of_interest)){
+        plot_df <- data.frame(t(UGA4_longitudinal_tpm_hemo_removed[rownames(UGA4_longitudinal_tpm_hemo_removed) %in% genes_of_interest[[i]], ]))
+        colnames(plot_df) <- genes_of_interest[[i]]
+        plot_df$BMI <- UGA4_longitudinal_metadata$BMI[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+        plot_df$Day <- UGA4_longitudinal_metadata$Day[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+
+      tpm_plots_genes_of_interest[[i]] <- ggplot(data = plot_df, aes(x = !!plot_df[,2], y = !!plot_df[,1])) +
+            geom_point(size = 1) +
+            geom_smooth(method = "lm", color = "#07686f") +
+            stat_fit_glance(method = 'lm',
+                       method.args = list(formula = y ~ x),
+                       geom = 'text',
+                       aes(label = paste("P-value = ", signif(..p.value.., digits = 4), sep = "")),
+                       label.x = 'middle', label.y = 'top', size = 5) +
+            #scale_color_paletteer_d("nationalparkcolors::SmokyMountains", name = "BMI") +
+            facet_grid(.~plot_df[,3]) +
+            labs(title = genenames$hgnc_symbol[match(colnames(plot_df)[[1]], genenames$ensembl_gene_id)], x = "BMI", y = "TPM") +
+            theme_bw() +
+        scale_y_log10() +
+            theme(axis.title.x = element_text(face = "bold", size = 20),
+            axis.title.y = element_text(face = "bold", size = 20),
+            axis.text = element_text(size = 15),
+            title = element_text(size = 25),
+            strip.background = element_blank(),
+            strip.text = element_text(size = 15),
+            aspect.ratio = 1,
+            element_text(family = "Helvetica"))
+}
+
+tpm_plots_genes_of_interest
+
+png("./Figures/Fig2/Fig2B_ltf_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+tpm_plots_genes_of_interest[[1]]
+dev.off()
+
+png("./Figures/Fig2/Fig2B_DEFA3_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+tpm_plots_genes_of_interest[[2]]
+dev.off()
+
+png("./Figures/Fig2/Fig2B_HP_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+tpm_plots_genes_of_interest[[3]]
+dev.off()
+
+pdf("./Figures/Fig2/Fig2B_ltf_tpm.pdf", height = 7, width = 11)
+tpm_plots_genes_of_interest[[1]]
+dev.off()
+
+pdf("./Figures/Fig2/Fig2B_DEFA3_tpm.pdf", height = 7, width = 11)
+tpm_plots_genes_of_interest[[2]]
+dev.off()
+
+pdf("./Figures/Fig2/Fig2B_HP_tpm.pdf", height = 7, width = 11)
+tpm_plots_genes_of_interest[[3]]
+dev.off()
+```
+
+
+
+### DEPRECATED AS OF 24Apr2024
+# Fig 2B: Plot TPM of individual genes
+```{r}
+tpm_plots_siggenes <- list()
+
+for(i in 1:length(sig_continuous_fullmodel$gene)){
+        plot_df <- data.frame(t(UGA4_longitudinal_tpm_hemo_removed[rownames(UGA4_longitudinal_tpm_hemo_removed) %in% sig_continuous_fullmodel$gene[[i]], ]))
+        colnames(plot_df) <- sig_continuous_fullmodel$gene[[i]]
+        plot_df$BMI <- UGA4_longitudinal_metadata$BMI[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+        plot_df$Day <- UGA4_longitudinal_metadata$Day[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+
+        tpm_plots_siggenes[[i]] <- ggplot(data = plot_df, aes(x = !!plot_df[,2], y = !!plot_df[,1])) +
+            geom_point(size = 1) +
+            geom_smooth(method = "lm", color = "#426737") +
+            stat_fit_glance(method = 'lm',
+                       method.args = list(formula = y ~ x),
+                       geom = 'text',
+                       aes(label = paste("P-value = ", signif(..p.value.., digits = 4), sep = "")),
+                       label.x = 'middle', label.y = 'top', size = 5) +
+            #scale_color_paletteer_d("nationalparkcolors::SmokyMountains", name = "BMI") +
+            facet_wrap(~plot_df[,3]) +
+            labs(title = genenames$hgnc_symbol[match(colnames(plot_df)[[1]], genenames$ensembl_gene_id)], x = "BMI", y = "TPM") +
+            theme_bw() +
+        scale_y_log10() +
+            theme(axis.title.x = element_text(face = "bold", size = 20),
+            axis.title.y = element_text(face = "bold", size = 20),
+            axis.text = element_text(size = 15),
+            title = element_text(size = 25),
+            strip.background = element_blank(),
+            strip.text = element_text(size = 15),
+            aspect.ratio = 1)
+}
+
+pdf("./Scripts/Supplement/Fig2_bmi_degenes_tpm.pdf", onefile = TRUE)
+tpm_plots_siggenes
+dev.off()
+
+genes_of_interest <- c("ENSG00000012223", "ENSG00000184557", "ENSG00000096006")
+tpm_plots_genes_of_interest <- list()
+for(i in 1:length(genes_of_interest)){
+        plot_df <- data.frame(t(UGA4_longitudinal_tpm_hemo_removed[rownames(UGA4_longitudinal_tpm_hemo_removed) %in% genes_of_interest[[i]], ]))
+        colnames(plot_df) <- genes_of_interest[[i]]
+        plot_df$BMI <- UGA4_longitudinal_metadata$BMI[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+        plot_df$Day <- UGA4_longitudinal_metadata$Day[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+
+      tpm_plots_genes_of_interest[[i]] <- ggplot(data = plot_df, aes(x = !!plot_df[,2], y = !!plot_df[,1])) +
+            geom_point(size = 1) +
+            geom_smooth(method = "lm", color = "#426737") +
+            stat_fit_glance(method = 'lm',
+                       method.args = list(formula = y ~ x),
+                       geom = 'text',
+                       aes(label = paste("P-value = ", signif(..p.value.., digits = 4), sep = "")),
+                       label.x = 'middle', label.y = 'top', size = 5) +
+            #scale_color_paletteer_d("nationalparkcolors::SmokyMountains", name = "BMI") +
+            facet_grid(.~plot_df[,3]) +
+            labs(title = genenames$hgnc_symbol[match(colnames(plot_df)[[1]], genenames$ensembl_gene_id)], x = "BMI", y = "TPM") +
+            theme_bw() +
+        scale_y_log10() +
+            theme(axis.title.x = element_text(face = "bold", size = 20),
+            axis.title.y = element_text(face = "bold", size = 20),
+            axis.text = element_text(size = 15),
+            title = element_text(size = 25),
+            strip.background = element_blank(),
+            strip.text = element_text(size = 15),
+            aspect.ratio = 1)
+}
+png("./Figures/Fig2/Fig2B_ltf_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+tpm_plots_genes_of_interest[[1]]
+dev.off()
+
+png("./Figures/Fig2/Fig2B_socs3_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+tpm_plots_genes_of_interest[[2]]
+dev.off()
+
+png("./Figures/Fig2/Fig2B_crisp3_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
+tpm_plots_genes_of_interest[[3]]
+dev.off()
+```
+
+# Fig 2C: Perform enrichment analysis
+```{r}
+all_continuous_fullmodel <- res_continuous_fullmodel %>%
+  data.frame() %>%
+  tibble::rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+genes <- all_continuous_fullmodel$log2FoldChange
+names(genes) <- all_continuous_fullmodel$gene
+genes <- sort(genes, decreasing = TRUE)
+
+genes_reactome <- all_continuous_fullmodel$log2FoldChange
+names(genes_reactome) <- all_continuous_fullmodel$gene
+names(genes_reactome) <- genenames$entrezgene_id[match(names(genes_reactome), genenames$ensembl_gene_id)]
+genes_reactome <- sort(genes_reactome, decreasing = TRUE)
+genes_reactome <- genes_reactome[!is.na(names(genes_reactome))]
+
+set.seed(139)
+
+enrichment_obese <- gseGO(genes,
+                    "org.Hs.eg.db",
+                    ont = "BP",
+                    keyType = "ENSEMBL",
+                    pvalueCutoff = 0.05,
+                    pAdjustMethod = "BH",
+                    minGSSize = 10,
+                    maxGSSize = 500,
+                    seed = TRUE)
+
+enrichment_reactome <- gsePathway(genes_reactome,
+               pvalueCutoff = 0.05,
+               # pvalueCutoff = 0.99,
+                pAdjustMethod = "BH",
+                verbose = FALSE,
+                eps = 0,
+               seed = TRUE)@result
+
+
+enriched_sets_obese <- enrichment_obese@result
+
+enrichment_all <- rbind(enrichment_reactome, enriched_sets_obese)
+
+sets_to_plot <- c("GO:0002227", "GO:0030099", "GO:0071396", "GO:0150076", "GO:0042116", "R-HSA-6798695")
+
+png("./Figures/Fig2/Fig2C_enrichment.png", res = 300, height = 1250, width = 2500, units = 'px')
+ggplot(data = enrichment_all %>% filter(ID %in% sets_to_plot), aes(x = NES, y = reorder(Description, NES), color = p.adjust, size = setSize)) +
+  geom_point() +
+  scale_color_gradientn(colors = c("#92ddc8", "#0a3a2a"), name = "Adjusted\nP Value") +
+  #scale_color_gradientn(colors = natparks.pals("Olympic"), name = "Normalized\nExpression") +
+  labs(x = "Normalized Enrichment Score", y = "Description") +
+  theme_bw() +
+  theme(axis.title = element_text(size = 20),
+        axis.text = element_text(size = 15))
+dev.off()
+```
+
+# Perform differential expression analysis
+This uses LRT to look for genes that are DE over time as a function of BMI, and also looks at genes that are DE as a function of BMI_centered only (BMI centered was used at the recommendation of DESeq)
+
+```{r}
+time_bmi_model <- ~ Day + BMI_centered + Gender + Day:BMI_centered + Age_centered
+time_bmi_model_reduced <- ~ Day + BMI_centered + Gender + Age_centered
+
+dds_time_bmi_continuous <- deseq_import(UGA4_longitudinal_counts_hemo_removed, UGA4_longitudinal_metadata, design_setting = time_bmi_model)
+
+dds_time_bmi_continuous <- estimateSizeFactors(dds_time_bmi_continuous)
+idx <- rowSums(counts(dds_time_bmi_continuous, normalized = TRUE) >= 10) >= 60
+dds_time_bmi_continuous <- dds_time_bmi_continuous[idx,]
+
+dds_LRT_time_bmi_continuous <- DESeq(dds_time_bmi_continuous, test = "LRT", reduced = time_bmi_model_reduced)
+dds_time_bmi_continuous_fullmodel <- DESeq(dds_time_bmi_continuous)
+
+res_LRT_continuous <- results(dds_LRT_time_bmi_continuous)
+res_continuous_fullmodel <- lfcShrink(dds_time_bmi_continuous_fullmodel, coef = "BMI_centered")
+
+sig_LRT_continuous <- res_LRT_continuous %>%
+  data.frame() %>%
+  tibble::rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  filter(padj < 0.05) %>%
+  mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_continuous_fullmodel <- res_continuous_fullmodel %>%
+  data.frame() %>%
+  tibble::rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  filter(padj < 0.05) %>%
+  mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+```
+
+# Combine lists of genes and export them
+```{r}
+write.csv(sig_continuous_fullmodel, "./Scripts/Supplement/Supplemental_Table_2.csv")
+```
+
+# Figure 2A: DEGPatterns Analysis of trends over time
+```{r}
+ntd_continuous <- normTransform(dds_time_bmi_continuous_fullmodel)[sig_continuous_fullmodel$gene]
+
+norm_count_data_continuous <- as.matrix(assay(ntd_continuous))
+
+clusters_time_continuous <- degPatterns(norm_count_data_continuous,
+                             metadata = UGA4_longitudinal_metadata,
+                             time = "Day",
+                             col = "BMI_Bivariate",
+                             reduce = TRUE)
+
+all_clusters_time_response_continuous <- split(clusters_time_continuous[[1]], sort(as.numeric(clusters_time_continuous[[1]]$cluster)))
+
+plot_df_long_continuous <- list()
+
+for(i in 1:length(all_clusters_time_response_continuous)){
+  plot_df <- data.frame(scale(t(assay(ntd_continuous)[rownames(assay(ntd_continuous)) %in% all_clusters_time_response_continuous[[i]]$gene, ]))) %>%
+    mutate(BMI = UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
+    mutate(Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))])
+
+  plot_df_long_continuous[[i]] <- pivot_longer(plot_df, cols = 1:(ncol(plot_df) - 2)) %>%
+    group_by(name, Day, BMI) %>%
+    mutate(mean = mean(value)) %>%
+    filter(row_number() == 1) %>%
+    mutate(Symbol = genenames$hgnc_symbol[match(name, genenames$ensembl_gene_id)]) %>%
+    mutate(Cluster = paste0("Cluster ", i, ": ", length(all_clusters_time_response_continuous[[i]]$gene), " genes"))
+}
+
+plot_df_long_all <- rbind(plot_df_long_continuous[[1]],
+                          plot_df_long_continuous[[2]],
+                          plot_df_long_continuous[[3]])
+
+tpm_heatmap <- data.frame(t(data.frame(assay(ntd_continuous)) %>% filter(rownames(.) %in% plot_df_long_all$name))) %>% 
+  mutate(BMI = UGA4_longitudinal_metadata$BMI_Bivariate[match(gsub("X", "", rownames(.)), rownames(UGA4_longitudinal_metadata))],
+         Day = UGA4_longitudinal_metadata$Day[match(gsub("X", "", rownames(.)), rownames(UGA4_longitudinal_metadata))]) %>%
+  arrange(BMI)
+
+heatmap_d0 <- tpm_heatmap %>% filter(Day == 0)
+annot_d0 <- data.frame(BMI = heatmap_d0$BMI)
+rownames(annot_d0) = rownames(heatmap_d0)
+
+pheatmap(heatmap_d0[, c(1:103)], annotation_row = annot_d0, cluster_rows = FALSE, scale = "row")
+
+heatmap_d3 <- tpm_heatmap %>% filter(Day == 3)
+annot_d3 <- data.frame(BMI = heatmap_d3$BMI)
+rownames(annot_d3) = rownames(heatmap_d3)
+
+pheatmap(heatmap_d3[, c(1:103)], annotation_row = annot_d3, cluster_rows = FALSE, scale = "col")
+
+heatmap_d7 <- tpm_heatmap %>% filter(Day == 7)
+annot_d7 <- data.frame(BMI = heatmap_d7$BMI)
+rownames(annot_d7) = rownames(heatmap_d7)
+
+pheatmap(heatmap_d7[, c(1:103)], annotation_row = annot_d7, cluster_rows = FALSE, scale = "col")
+
+png("./Figures/Fig2/Fig2A_gene_patterns.png",
+    height = 1500, width = 4000, res = 300, units = "px")
+ggplot(plot_df_long_all, aes(x = Day, y = mean, color = BMI)) +
+  geom_boxplot() +
+      geom_point(position = position_jitterdodge()) +
+    scale_color_manual(values = c("#289F90", "#EAC36F")) +
+      #scale_color_manual(values = c("#638475", "#735D78")) +
+    #scale_color_paletteer_d("nationalparkcolors::SmokyMountains", name = "BMI") +
+    #paletteer::scale_fill_paletteer_c("ggthemes::Red-Green-Gold Diverging", name = "Normalized\nExpression", limits = c(-1.5, 1.5)) +
+    labs(y = "Mean Z-Score") +
+    facet_wrap(~ Cluster) +
+    theme_bw() +
+    theme(axis.text.y = element_text(size = 15),
+        axis.text.x = element_text(size = 15),
+        axis.title = element_text(face = "bold", size = 20),
+        strip.text = element_text(face = "bold", size = 17),
+        strip.background = element_blank(),
+        legend.text = element_text(size = 12),
+        legend.title = element_text(size = 15),
+        aspect.ratio = 1)
+dev.off()
+```

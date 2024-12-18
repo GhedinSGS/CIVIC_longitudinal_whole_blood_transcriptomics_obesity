@@ -1,0 +1,545 @@
+---
+title: "Figure 1: Differential Expression and Vaccine Response"
+output: html_notebook
+---
+
+
+```{r}
+library(DESeq2)
+library(dplyr)
+library(biomaRt)
+library(DEGreport)
+library(ggplot2)
+library(clusterProfiler)
+library(ggpubr)
+library(UpSetR)
+library(cowplot)
+library(tidyr)
+library(ComplexHeatmap)
+library(paletteer)
+library(edgeR)
+library(NatParksPalettes)
+library(wesanderson)
+library(purrr)
+```
+
+```{r, setup, include=FALSE}
+knitr::opts_knit$set(root.dir = "/Users/hockmanmr/OneDrive - National Institutes of Health/LAB_STUFF/PEOPLE/meg/manuscripts/CIVIC Longitudinal Transcriptomics")
+```
+
+# Step 1: Import Data
+Remember to set the appropriate working directory. The .RData file here was generated using "Data Wrangling" and "Preprocessing Scripts"
+```{r}
+load("./Scripts/Data/Publication/Longitudinal_complete_data.RData")
+colfunc <- colorRampPalette(c("#3A3A98", "white", "#832424"))
+
+```
+
+## Set up Metadata
+* Set "Day" as a factor - I want DESeq to consider nonlinear patterns in expression
+* Add a bivariate, categorical classification for BMI, and make it a factor
+* Set a categorical classifier for serology, grouping patients by their seroconversion values
+* Set metadata rownames for downstream analyses
+* Center BMI, seroconversion score, and age for DESeq
+* Generate a table of different gene identifiers
+
+```{r}
+#Set up a few variables
+UGA4_longitudinal_metadata$Day <- factor(UGA4_longitudinal_metadata$Day)
+UGA4_longitudinal_metadata$BMI_Bivariate <- ifelse(UGA4_longitudinal_metadata$BMI < 30, "Non_Obese",
+                                                   "Obese")
+UGA4_longitudinal_metadata$BMI_Bivariate <- factor(UGA4_longitudinal_metadata$BMI_Bivariate, levels = c("Non_Obese", "Obese"))
+
+UGA4_longitudinal_metadata$Serology <- ifelse(UGA4_longitudinal_metadata$vax_strain_seroconversion <= 2,
+                                                          "Non Responder", ifelse(UGA4_longitudinal_metadata$vax_strain_seroconversion < 4,
+                                                          "Low Responder", "High Responder"))
+UGA4_longitudinal_metadata$Serology <- factor(UGA4_longitudinal_metadata$Serology, levels = c("Non Responder", "Low Responder", "High Responder"))
+
+#Set rownames
+rownames(UGA4_longitudinal_metadata) <- paste0(UGA4_longitudinal_metadata$ID, "_", UGA4_longitudinal_metadata$Day)
+
+#Center data, because DESeq throws a warning when it's not 
+UGA4_longitudinal_metadata$BMI_centered <- scale(UGA4_longitudinal_metadata$BMI, center = TRUE)
+UGA4_longitudinal_metadata$seroconversion_centered <- scale(UGA4_longitudinal_metadata$vax_strain_seroconversion, center = TRUE)
+UGA4_longitudinal_metadata$Age_centered <- scale(UGA4_longitudinal_metadata$Age, center = TRUE)
+
+#Generate a table of gene names for different applications (human-readable)
+mart <- useEnsembl(biomart = "ensembl", "hsapiens_gene_ensembl")#, mirror = "useast")
+geneids <- rownames(UGA4_longitudinal_counts_hemo_removed)
+genenames <- as.data.frame(getBM(filters = "ensembl_gene_id",
+                                 attributes = c("ensembl_gene_id", "hgnc_symbol"),
+                                 values = geneids,
+                                 mart = mart))
+
+genenames$hgnc_symbol <- ifelse(genenames$hgnc_symbol == "", genenames$ensembl_gene_id, genenames$hgnc_symbol)
+```
+
+
+## Set deseq import function
+* Makes a function to make deseq objects from data, checks to make sure that the count colnames are equal to the metadata rownames, a requirement for deseq. Designed to be flexible when considering single day or multi-day data.
+```{r}
+deseq_import <- function(counts, metadata, design_setting = ~1) {
+  ifelse(length(unique(metadata$Day)) > 1,
+  rownames(metadata) <- paste0(metadata$ID, "_", metadata$Day),
+  rownames(metadata) <- metadata$ID)
+
+  if (all(rownames(metadata) == colnames(counts))) {
+    object <- DESeqDataSetFromMatrix(
+      countData = round(as.matrix(counts)),
+      colData = metadata,
+      design = design_setting)} else {
+    "names not equal"
+  }
+  return(object)
+}
+```
+
+## Perform data pre-filtering
+* For the first part of the analysis, we only consider "High" and "Non" responders - this creates tables only including those patients.
+```{r}
+metadata_filtered <- UGA4_longitudinal_metadata %>%
+                    filter(Serology %in% c("Non Responder", "High Responder")) %>%
+                    mutate(Serology = factor(Serology, levels = c("Non Responder", "High Responder")))
+
+counts_filtered <- UGA4_longitudinal_counts_hemo_removed[colnames(UGA4_longitudinal_counts_hemo_removed) %in% rownames(metadata_filtered)]
+
+tpm_filtered <- UGA4_longitudinal_tpm_hemo_removed[colnames(UGA4_longitudinal_tpm_hemo_removed) %in% rownames(metadata_filtered)]
+```
+
+# Time vs. Response Categorical: Differential Expression with DESeq
+* Performs differential expression analysis with respect to time (Day) and response as a categorical variable (Serology)
+* Keep only rows that have a count of at least 10 in the smallest group considered.
+* Perform a likelihood ratio test, removing the interaction of time and response, and also perform analysis using the full model (High vs. Non Responders). Applies lfcshrink in this case.
+* Pull out differentially expressed genes
+```{r}
+time_response_model <- ~ Day + Serology + Gender + Age_centered + Day:Serology
+time_response_model_reduced <- ~ Day + Serology + Gender + Age_centered
+
+groupsizes <- c(nrow(metadata_filtered %>% filter(Day == 0) %>% filter(Serology %in% "Non Responder")), nrow(metadata_filtered %>% filter(Day == 0) %>% filter(Serology %in% "High Responder")))
+
+dds_time_response <- deseq_import(counts_filtered, metadata_filtered, design_setting = time_response_model)
+
+dds_time_response <- estimateSizeFactors(dds_time_response)
+keep <- rowSums(counts(dds_time_response, normalized = TRUE) >= 10) >= min(groupsizes)
+dds_time_response <- dds_time_response[keep, ]
+
+dds_LRT_time_response <- DESeq(dds_time_response, test = "LRT", reduced = time_response_model_reduced)
+dds_time_response_fullmodel <- DESeq(dds_time_response)
+
+res_LRT <- results(dds_LRT_time_response)
+res_fullmodel <- lfcShrink(dds_time_response_fullmodel, coef = "Serology_High.Responder_vs_Non.Responder")
+
+sig_LRT <- res_LRT %>%
+  data.frame() %>%
+  tibble::rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  filter(padj < 0.05) %>%
+  mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_fullmodel <- res_fullmodel %>%
+  data.frame() %>%
+  tibble::rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  filter(padj < 0.05) %>%
+  mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+```
+
+# Time vs. Response Continuous
+* Performs differential expression analysis with respect to time (Day) and response as a continuous variable (seroconversion_centered)
+* Keep only rows that have a count of at least 10 in the smallest group considered, carried over from previous analysis.
+* Perform a likelihood ratio test, removing the interaction of time and response, and also perform analysis using the full model.
+* Pull out differentially expressed genes
+```{r}
+time_response_model <- ~ Day + seroconversion_centered + Gender + Age_centered + Day:seroconversion_centered
+time_response_model_reduced <- ~ Day + seroconversion_centered + Gender + Age_centered
+
+dds_time_response_continuous <- deseq_import(UGA4_longitudinal_counts_hemo_removed, UGA4_longitudinal_metadata, design_setting = time_response_model)
+
+dds_time_response_continuous <- estimateSizeFactors(dds_time_response_continuous)
+idx <- rowSums(counts(dds_time_response_continuous, normalized = TRUE) >= 10 ) >= 57
+dds_time_response_continuous <- dds_time_response_continuous[idx,]
+
+dds_LRT_time_response_continuous <- DESeq(dds_time_response_continuous, test = "LRT", reduced = time_response_model_reduced)
+dds_time_response_continuous_fullmodel <- DESeq(dds_time_response_continuous)
+
+res_LRT_continuous <- results(dds_LRT_time_response_continuous)
+res_continuous_fullmodel <- lfcShrink(dds_time_response_continuous_fullmodel, coef = "seroconversion_centered")
+
+sig_LRT_continuous <- res_LRT_continuous %>%
+  data.frame() %>%
+  tibble::rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  filter(padj < 0.05) %>%
+  mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+
+sig_continuous_fullmodel <- res_continuous_fullmodel %>%
+  data.frame() %>%
+  tibble::rownames_to_column(var = "gene") %>%
+  as_tibble() %>%
+  filter(padj < 0.05) %>%
+  mutate(genename = genenames$hgnc_symbol[match(gene, genenames$ensembl_gene_id)])
+```
+
+# Export differentially expressed genes
+* Combine both tables of DEGenes into one and export for supplement
+```{r}
+all_degenes <- rbind(sig_LRT %>% mutate(method = "Categorical"),
+                     sig_LRT_continuous %>% mutate(method = "Continuous"))
+
+write.csv(all_degenes, "./Scripts/Supplement/Supplemental_Table_1.csv")
+```
+
+# Perform DEGPatterns analysis
+```{r}
+ntd_categorical <- normTransform(dds_LRT_time_response)[sig_LRT$gene]
+
+norm_count_data_categorical <- as.matrix(assay(ntd_categorical))
+
+clusters_time_categorical <- degPatterns(norm_count_data_categorical,
+                             metadata = metadata_filtered,
+                             time = "Day",
+                             col = "Serology",
+                             reduce = TRUE,
+                             minc = 5)
+
+ntd_continuous <- normTransform(dds_LRT_time_response_continuous)[sig_LRT_continuous$gene]
+norm_count_data_continuous <- as.matrix(assay(ntd_continuous))
+
+clusters_time_continuous <- degPatterns(norm_count_data_continuous,
+                                        metadata = UGA4_longitudinal_metadata,
+                                        time = "Day",
+                                        col = "Serology",
+                                        reduce = TRUE, 
+                                        minc = 5)
+
+genes_categorical <- clusters_time_categorical[[1]] %>% mutate(id = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)])
+genes_continuous <- clusters_time_continuous[[1]] %>% mutate(id = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)])
+```
+
+# Figure 1A: Heatmap of continuous DEGenes, bold those found by DEGPatterns
+* Plot a heatmap of genes detected using continuous serology analysis, put the names of those detected by DEGPatterns in bold
+```{r}
+ntd_continuous <- normTransform(dds_LRT_time_response_continuous)[sig_LRT_continuous$gene]
+norm_count_data_continuous <- as.matrix(assay(ntd_continuous))
+
+continuous <- data.frame(scale(t(norm_count_data_continuous), center = TRUE))
+
+colnames(continuous) <- genenames$hgnc_symbol[match(colnames(continuous), genenames$ensembl_gene_id)]
+
+continuous <- continuous %>%
+  mutate(Response = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
+         Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
+         Seroconversion = UGA4_longitudinal_metadata$vax_strain_seroconversion[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
+  arrange(Day, Response)
+
+annot <- data.frame(Response = continuous$Response)
+#Day = continuous$Day,
+rownames(annot) <- rownames(continuous)
+
+ann_colors = list(
+  Response = c("High Responder" = "#63ACBE", "Low Responder" = "#EE442F", "Non Responder"="#601A4A"))
+  #Day = c("0" = "#bed3e5", "3" = "#a7c1e0", "7" = "#6f91c3", "28" = "#4c6ea2"))
+
+# use this function to make row or column names bold
+# parameters:
+#   mat: the matrix passed to pheatmap
+#   rc_fun: either rownames or colnames
+#   rc_names: vector of names that should appear in boldface
+make_bold_names <- function(mat, rc_fun, rc_names) {
+  bold_names <- rc_fun(mat)
+  ids <- rc_names %>% match(rc_fun(mat))
+  ids %>%
+    walk(
+      function(i)
+        bold_names[i] <<-
+        bquote(bold(.(rc_fun(mat)[i]))) %>%
+        as.expression()
+    )
+  bold_names
+}
+
+
+png("./Figures/Fig1/Fig1A_Heatmap.png", height = 2000, width = 4000, res = 300, units = "px")
+pheatmap(continuous[, c(1:53)],
+         annotation_row = annot,
+         cluster_rows = FALSE, 
+         color = colfunc(100),
+         breaks = seq(-4, 4, length.out = 12),
+         show_rownames = FALSE,
+         gaps_row = seq(0, 662, 163), #Day first, then Response
+         labels_col = make_bold_names(continuous[, c(1:53)], colnames, genes_continuous$id),
+         #gaps_row = c(224, 376), #Response first, then Day
+         annotation_colors = ann_colors,
+         heatmap_legend_param = list(title = "Scaled Expression"),
+         fontfamily = "Helvetica")
+dev.off()
+
+pdf("./Figures/Fig1/Fig1A_Heatmap.pdf", height = 8, width = 17)
+pheatmap(continuous[, c(1:53)],
+         annotation_row = annot,
+         cluster_rows = FALSE, 
+         color = colfunc(100),
+         breaks = seq(-4, 4, length.out = 12),
+         show_rownames = FALSE,
+         gaps_row = seq(0, 662, 163), #Day first, then Response
+         labels_col = make_bold_names(continuous[, c(1:53)], colnames, genes_continuous$id),
+         #gaps_row = c(224, 376), #Response first, then Day
+         annotation_colors = ann_colors,
+         heatmap_legend_param = list(title = "Scaled Expression"),
+         fontfamily = "Helvetica")
+dev.off()
+```
+# Supplement: Genes found using categorical analysis
+* Plots a heatmap of categorical analysis genes, and puts those that share an expression pattern in bold.
+```{r}
+ntd_categorical <- normTransform(dds_LRT_time_response)[sig_LRT$gene]
+norm_count_data_categorical <- as.matrix(assay(ntd_categorical))
+
+categorical <- data.frame(scale(t(norm_count_data_categorical), center = TRUE))
+
+colnames(categorical) <- genenames$hgnc_symbol[match(colnames(categorical), genenames$ensembl_gene_id)]
+
+categorical <- categorical %>%
+  mutate(Response = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
+         Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
+         Seroconversion = UGA4_longitudinal_metadata$vax_strain_seroconversion[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
+  arrange(Day, Response)
+
+annot <- data.frame(Response = categorical$Response)
+#Day = categorical$Day,
+rownames(annot) <- rownames(categorical)
+
+ann_colors = list(
+  Response = c("High Responder" = "#63ACBE", "Low Responder" = "#EE442F", "Non Responder"="#601A4A"))
+  #Day = c("0" = "#bed3e5", "3" = "#a7c1e0", "7" = "#6f91c3", "28" = "#4c6ea2"))
+
+# use this function to make row or column names bold
+# parameters:
+#   mat: the matrix passed to pheatmap
+#   rc_fun: either rownames or colnames
+#   rc_names: vector of names that should appear in boldface
+make_bold_names <- function(mat, rc_fun, rc_names) {
+  bold_names <- rc_fun(mat)
+  ids <- rc_names %>% match(rc_fun(mat))
+  ids %>%
+    walk(
+      function(i)
+        bold_names[i] <<-
+        bquote(bold(.(rc_fun(mat)[i]))) %>%
+        as.expression()
+    )
+  bold_names
+}
+
+png("./Figures/Supplement/Supplemental_Fig1.png", height = 2000, width = 4000, res = 300, units = "px")
+pheatmap(categorical[, c(1:53)],
+         annotation_row = annot,
+         cluster_rows = FALSE, 
+         color = colfunc(100),
+         breaks = seq(-4, 4, length.out = 12),
+         show_rownames = FALSE,
+         gaps_row = seq(0, 496, 124), #Day first, then Response
+         labels_col = make_bold_names(categorical[, c(1:53)], colnames, genes_categorical$id),
+         #gaps_row = c(224, 376), #Response first, then Day
+         annotation_colors = ann_colors,
+         heatmap_legend_param = list(title = "Scaled Expression"),
+         fontfamily = "Helvetica")
+dev.off()
+
+pdf("./Figures/Supplement/Supplemental_Fig1.pdf", height = 8, width = 17)
+pheatmap(categorical[, c(1:53)],
+         annotation_row = annot,
+         cluster_rows = FALSE, 
+         color = colfunc(100),
+         breaks = seq(-4, 4, length.out = 12),
+         show_rownames = FALSE,
+         gaps_row = seq(0, 496, 124), #Day first, then Response
+         labels_col = make_bold_names(categorical[, c(1:53)], colnames, genes_categorical$id),
+         #gaps_row = c(224, 376), #Response first, then Day
+         annotation_colors = ann_colors,
+         heatmap_legend_param = list(title = "Scaled Expression"),
+         fontfamily = "Helvetica")
+dev.off()
+```
+
+# Figure 1C: Plot individual gene expression
+* Select two genes with representative expression patterns
+* Plot TPM of those genes
+
+```{r}
+#genes <- unique(c(sig_LRT$gene, sig_LRT_continuous$gene))
+genes <- c("ENSG00000211896", "ENSG00000170476")
+tpm_plots_siggenes <- list()
+
+for(i in 1:length(genes)){
+        plot_df <- data.frame(t(UGA4_longitudinal_tpm_hemo_removed[rownames(UGA4_longitudinal_tpm_hemo_removed) %in% genes[[i]], ]))
+        colnames(plot_df) <- genes[[i]]
+        plot_df$Serology <- UGA4_longitudinal_metadata$Serology[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+        plot_df$Day <- UGA4_longitudinal_metadata$Day[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+        plot_df$ID <- UGA4_longitudinal_metadata$ID[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
+    
+      tpm_plots_siggenes[[i]] <- ggplot(data = plot_df, aes(x = !!plot_df[,3], y = !!plot_df[,1], color = !!plot_df[,2], group = !!plot_df[,2])) +
+            geom_point(position = position_jitterdodge()) +
+         geom_smooth(se = FALSE) +
+        #scale_color_manual(values = c("#41521f", "#b4dc7f", "#ea9010"), name = "Response Group") +
+          scale_color_manual(values = c("#601A4A", "#EE442F", "#63ACBE"), name = "Response Group") +
+            labs(title = genenames$hgnc_symbol[match(colnames(plot_df)[[1]], genenames$ensembl_gene_id)], x = "Day", y = "TPM") +
+          scale_y_log10() +
+            theme_bw() +
+        theme(axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    axis.title = element_text(size = 20),
+    strip.text = element_text(size = 17),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 15),
+    title = element_text(size = 15),
+    text=element_text(family = "Helvetica"),
+    aspect.ratio = 1)
+}
+
+png("./Figures/Fig1/Fig1C_TPM_IGHG1.png", height = 1750, width = 2000, res = 300, units = "px")
+tpm_plots_siggenes[[1]]
+dev.off()
+
+png("./Figures/Fig1/Fig1C_TPM_MZB1.png", height = 1750, width = 2000, res = 300, units = "px")
+tpm_plots_siggenes[[2]]
+dev.off()
+
+pdf("./Figures/Fig1/Fig1C_TPM_IGHG1.pdf")
+tpm_plots_siggenes[[1]]
+dev.off()
+
+pdf("./Figures/Fig1/Fig1C_TPM_MZB1.pdf")
+tpm_plots_siggenes[[2]]
+dev.off()
+```
+
+###################DEPRECATED
+# Figure 1A: Venn Diagram Comparison
+```{r}
+lrt_genes <- list(Categorical = sig_LRT$gene,
+                  Continuous = sig_LRT_continuous$gene)
+
+
+VennDiagram::venn.diagram(lrt_genes, 
+                          filename = "./Figures/Fig1/Fig1A_venn.png",
+                           # Circles
+        lwd = 2,
+        fill = gradient_pal,
+        
+        imagetype="png" ,
+        height = 600 , 
+        width = 800 , 
+        resolution = 300,
+        
+        # Numbers
+        cex = .6,
+        fontface = "bold",
+        fontfamily = "sans",
+        
+        # Set names
+        cat.cex = 0.6,
+        cat.fontface = "bold",
+        cat.default.pos = "outer",
+        cat.fontfamily = "sans",
+        cat.pos = c(-27, 27),
+        cat.dist = c(0.055, 0.055),
+)
+```
+
+# Figure 1B: Investigate trends in expression over time
+```{r}
+ntd_categorical <- normTransform(dds_LRT_time_response)[sig_LRT$gene]
+
+norm_count_data_categorical <- as.matrix(assay(ntd_categorical))
+
+clusters_time_categorical <- degPatterns(norm_count_data_categorical,
+                             metadata = metadata_filtered,
+                             time = "Day",
+                             col = "Serology",
+                             reduce = TRUE,
+                             minc = 5)
+
+ntd_continuous <- normTransform(dds_LRT_time_response_continuous)[sig_LRT_continuous$gene]
+norm_count_data_continuous <- as.matrix(assay(ntd_continuous))
+
+clusters_time_continuous <- degPatterns(norm_count_data_continuous,
+                                        metadata = UGA4_longitudinal_metadata,
+                                        time = "Day",
+                                        col = "Serology",
+                                        reduce = TRUE, 
+                                        minc = 5)
+
+all_clusters_time_response_categorical <- split(clusters_time_categorical[[1]], sort(as.numeric(clusters_time_categorical[[1]]$cluster)))
+all_clusters_time_response_continuous <- split(clusters_time_continuous[[1]], sort(as.numeric(clusters_time_continuous[[1]]$cluster)))
+
+
+genes_categorical <- all_clusters_time_response_categorical[[1]] %>% mutate(id = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)])
+genes_continuous <- rbind(all_clusters_time_response_continuous[[1]] %>% mutate(id = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)]),
+                          all_clusters_time_response_continuous[[2]] %>% mutate(id = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)]))
+
+# Generate tables of mean normalized count values by day and response group
+
+for(i in 1:length(all_clusters_time_response_categorical)){
+  plot_df <- data.frame(scale(t(assay(ntd_categorical)[rownames(assay(ntd_categorical)) %in% all_clusters_time_response_categorical[[i]]$gene, ]))) %>%
+    mutate(Response = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
+    mutate(Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))])
+
+  plot_df_long_categorical <- pivot_longer(plot_df, cols = 1:(ncol(plot_df) - 2)) %>%
+    group_by(name, Day, Response) %>%
+    mutate(mean = mean(value)) %>%
+    filter(row_number() == 1) %>%
+    mutate(Symbol = genenames$hgnc_symbol[match(name, genenames$ensembl_gene_id)])
+}
+
+plot_df_long_continuous <- list()
+
+for(i in 1:length(all_clusters_time_response_continuous)){
+  plot_df <- data.frame(scale(t(assay(ntd_continuous)[rownames(assay(ntd_continuous)) %in% all_clusters_time_response_continuous[[i]]$gene, ]))) %>%
+    mutate(Response = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
+    mutate(Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))])
+
+  plot_df_long_continuous[[i]] <- pivot_longer(plot_df, cols = 1:(ncol(plot_df) - 2)) %>%
+    group_by(name, Day, Response) %>%
+    mutate(mean = mean(value)) %>%
+    filter(row_number() == 1) %>%
+    mutate(Symbol = genenames$hgnc_symbol[match(name, genenames$ensembl_gene_id)])
+}
+
+# Make a table with all mean scaled counts, labeled by which method they were identified with.
+
+genes <- list(Continuous_1 = plot_df_long_continuous[[1]]$name,
+              Continuous_2 = plot_df_long_continuous[[2]]$name,
+              Categorical = plot_df_long_categorical$name)
+
+intersects <- data.frame(list_to_matrix(genes)) %>%
+  mutate(method = ifelse(Continuous_1 == 1 & Categorical == 0, "Continuous",
+                ifelse(Continuous_2 == 1 & Categorical == 0, "Continuous",
+                       ifelse(Continuous_1 == 1 & Categorical == 1, "Combined",
+                              ifelse(Continuous_2 == 1 & Categorical == 1, "Combined",
+                                    ifelse(Continuous_1 == 0 & Continuous_2 == 0 & Categorical == 1, "Categorical",
+                              "try again"))))))
+
+plot_df_long_both <- rbind(plot_df_long_continuous[[1]],
+                           plot_df_long_continuous[[2]],
+                           plot_df_long_categorical) %>%
+  mutate(method = intersects$method[match(name, rownames(intersects))]) %>%
+  mutate(method = factor(method, levels = c("Categorical", "Continuous", "Combined")))
+
+colfunc <- colorRampPalette(c("#62a1db","#e7d87d", "#dd9f40","#b4451f", "#b01111"))
+
+png("./Figures/Fig1/Fig1B_heatmap.png", height = 3500, width = 3200, res = 300, units = "px")
+ggplot(data = plot_df_long_both, aes(x = Day, y = Symbol, fill = mean)) +
+geom_tile() +
+facet_grid(method~Response, scales = "free") +
+scale_fill_gradientn(colors = colfunc(100), limits = c(-1.5, 1.5), name = "Mean\nZ-Score") +
+labs(y = "Gene") +
+theme_classic() +
+theme(axis.text.y = element_text(size = 15),
+    axis.text.x = element_text(size = 15),
+    axis.title = element_text(face = "bold", size = 20),
+    strip.text = element_text(face = "bold", size = 17),
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 15))
+dev.off()
+```
