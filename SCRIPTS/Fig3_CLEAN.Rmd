@@ -23,7 +23,7 @@ library(purrr)
 
 # Set working directory
 ```{r, setup, include=FALSE}
-knitr::opts_knit$set(root.dir = "/Users/hockmanmr/OneDrive - National Institutes of Health/LAB_STUFF/PEOPLE/meg/manuscripts/CIVIC Longitudinal Transcriptomics")
+knitr::opts_knit$set(root.dir = )
 ```
 
 # Step 1: Import Data
