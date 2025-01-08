@@ -22,17 +22,16 @@ library(NatParksPalettes)
 library(wesanderson)
 library(purrr)
 ```
-# Set up working directory
+
 ```{r, setup, include=FALSE}
-knitr::opts_knit$set(root.dir = )
+knitr::opts_knit$set()
 ```
 
 # Step 1: Import Data
 Remember to set the appropriate working directory. The .RData file here was generated using "Data Wrangling" and "Preprocessing Scripts"
 ```{r}
-load("./Scripts/Data/Publication/Longitudinal_complete_data.RData")
+load("./Longitudinal_complete_data.RData")
 colfunc <- colorRampPalette(c("#3A3A98", "white", "#832424"))
-
 ```
 
 ## Set up Metadata
@@ -184,9 +183,16 @@ sig_continuous_fullmodel <- res_continuous_fullmodel %>%
 * Combine both tables of DEGenes into one and export for supplement
 ```{r}
 all_degenes <- rbind(sig_LRT %>% mutate(method = "Categorical"),
-                     sig_LRT_continuous %>% mutate(method = "Continuous"))
+                     sig_LRT_continuous %>% mutate(method = "Continuous")) %>%
+   mutate(pvalue = signif(pvalue, 3),
+          padj = signif(padj, 3),
+          stat = signif(stat, 3),
+          lfcSE = signif(lfcSE, 3),
+          log2FoldChange = signif(log2FoldChange, 3),
+          baseMean = signif(baseMean, 3))
 
-write.csv(all_degenes, "./Scripts/Supplement/Supplemental_Table_1.csv")
+
+write.csv(all_degenes, "./OUTPUTS/Supplement/Supplemental_Table_1.csv")
 ```
 
 # Perform DEGPatterns analysis
@@ -259,7 +265,7 @@ make_bold_names <- function(mat, rc_fun, rc_names) {
 }
 
 
-png("./Figures/Fig1/Fig1A_Heatmap.png", height = 2000, width = 4000, res = 300, units = "px")
+png("./OUTPUTS/Fig1A_Heatmap.png", height = 2000, width = 4000, res = 300, units = "px")
 pheatmap(continuous[, c(1:53)],
          annotation_row = annot,
          cluster_rows = FALSE, 
@@ -274,7 +280,7 @@ pheatmap(continuous[, c(1:53)],
          fontfamily = "Helvetica")
 dev.off()
 
-pdf("./Figures/Fig1/Fig1A_Heatmap.pdf", height = 8, width = 17)
+pdf("./OUTPUTS/Fig1A_Heatmap.pdf", height = 8, width = 17)
 pheatmap(continuous[, c(1:53)],
          annotation_row = annot,
          cluster_rows = FALSE, 
@@ -331,7 +337,7 @@ make_bold_names <- function(mat, rc_fun, rc_names) {
   bold_names
 }
 
-png("./Figures/Supplement/Supplemental_Fig1.png", height = 2000, width = 4000, res = 300, units = "px")
+png("./OUTPUTS/Supplemental_Fig1.png", height = 2000, width = 4000, res = 300, units = "px")
 pheatmap(categorical[, c(1:53)],
          annotation_row = annot,
          cluster_rows = FALSE, 
@@ -346,7 +352,7 @@ pheatmap(categorical[, c(1:53)],
          fontfamily = "Helvetica")
 dev.off()
 
-pdf("./Figures/Supplement/Supplemental_Fig1.pdf", height = 8, width = 17)
+pdf("./OUTPUTS/Supplemental_Fig1.pdf", height = 8, width = 17)
 pheatmap(categorical[, c(1:53)],
          annotation_row = annot,
          cluster_rows = FALSE, 
@@ -397,149 +403,19 @@ for(i in 1:length(genes)){
     aspect.ratio = 1)
 }
 
-png("./Figures/Fig1/Fig1C_TPM_IGHG1.png", height = 1750, width = 2000, res = 300, units = "px")
+png("./OUTPUTS/Fig1C_TPM_IGHG1.png", height = 1750, width = 2000, res = 300, units = "px")
 tpm_plots_siggenes[[1]]
 dev.off()
 
-png("./Figures/Fig1/Fig1C_TPM_MZB1.png", height = 1750, width = 2000, res = 300, units = "px")
+png("./OUTPUTS/Fig1C_TPM_MZB1.png", height = 1750, width = 2000, res = 300, units = "px")
 tpm_plots_siggenes[[2]]
 dev.off()
 
-pdf("./Figures/Fig1/Fig1C_TPM_IGHG1.pdf")
+pdf("./OUTPUTS/Fig1C_TPM_IGHG1.pdf")
 tpm_plots_siggenes[[1]]
 dev.off()
 
-pdf("./Figures/Fig1/Fig1C_TPM_MZB1.pdf")
+pdf("./OUTPUTS/Fig1C_TPM_MZB1.pdf")
 tpm_plots_siggenes[[2]]
-dev.off()
-```
-
-###################DEPRECATED
-# Figure 1A: Venn Diagram Comparison
-```{r}
-lrt_genes <- list(Categorical = sig_LRT$gene,
-                  Continuous = sig_LRT_continuous$gene)
-
-
-VennDiagram::venn.diagram(lrt_genes, 
-                          filename = "./Figures/Fig1/Fig1A_venn.png",
-                           # Circles
-        lwd = 2,
-        fill = gradient_pal,
-        
-        imagetype="png" ,
-        height = 600 , 
-        width = 800 , 
-        resolution = 300,
-        
-        # Numbers
-        cex = .6,
-        fontface = "bold",
-        fontfamily = "sans",
-        
-        # Set names
-        cat.cex = 0.6,
-        cat.fontface = "bold",
-        cat.default.pos = "outer",
-        cat.fontfamily = "sans",
-        cat.pos = c(-27, 27),
-        cat.dist = c(0.055, 0.055),
-)
-```
-
-# Figure 1B: Investigate trends in expression over time
-```{r}
-ntd_categorical <- normTransform(dds_LRT_time_response)[sig_LRT$gene]
-
-norm_count_data_categorical <- as.matrix(assay(ntd_categorical))
-
-clusters_time_categorical <- degPatterns(norm_count_data_categorical,
-                             metadata = metadata_filtered,
-                             time = "Day",
-                             col = "Serology",
-                             reduce = TRUE,
-                             minc = 5)
-
-ntd_continuous <- normTransform(dds_LRT_time_response_continuous)[sig_LRT_continuous$gene]
-norm_count_data_continuous <- as.matrix(assay(ntd_continuous))
-
-clusters_time_continuous <- degPatterns(norm_count_data_continuous,
-                                        metadata = UGA4_longitudinal_metadata,
-                                        time = "Day",
-                                        col = "Serology",
-                                        reduce = TRUE, 
-                                        minc = 5)
-
-all_clusters_time_response_categorical <- split(clusters_time_categorical[[1]], sort(as.numeric(clusters_time_categorical[[1]]$cluster)))
-all_clusters_time_response_continuous <- split(clusters_time_continuous[[1]], sort(as.numeric(clusters_time_continuous[[1]]$cluster)))
-
-
-genes_categorical <- all_clusters_time_response_categorical[[1]] %>% mutate(id = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)])
-genes_continuous <- rbind(all_clusters_time_response_continuous[[1]] %>% mutate(id = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)]),
-                          all_clusters_time_response_continuous[[2]] %>% mutate(id = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)]))
-
-# Generate tables of mean normalized count values by day and response group
-
-for(i in 1:length(all_clusters_time_response_categorical)){
-  plot_df <- data.frame(scale(t(assay(ntd_categorical)[rownames(assay(ntd_categorical)) %in% all_clusters_time_response_categorical[[i]]$gene, ]))) %>%
-    mutate(Response = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
-    mutate(Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))])
-
-  plot_df_long_categorical <- pivot_longer(plot_df, cols = 1:(ncol(plot_df) - 2)) %>%
-    group_by(name, Day, Response) %>%
-    mutate(mean = mean(value)) %>%
-    filter(row_number() == 1) %>%
-    mutate(Symbol = genenames$hgnc_symbol[match(name, genenames$ensembl_gene_id)])
-}
-
-plot_df_long_continuous <- list()
-
-for(i in 1:length(all_clusters_time_response_continuous)){
-  plot_df <- data.frame(scale(t(assay(ntd_continuous)[rownames(assay(ntd_continuous)) %in% all_clusters_time_response_continuous[[i]]$gene, ]))) %>%
-    mutate(Response = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
-    mutate(Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))])
-
-  plot_df_long_continuous[[i]] <- pivot_longer(plot_df, cols = 1:(ncol(plot_df) - 2)) %>%
-    group_by(name, Day, Response) %>%
-    mutate(mean = mean(value)) %>%
-    filter(row_number() == 1) %>%
-    mutate(Symbol = genenames$hgnc_symbol[match(name, genenames$ensembl_gene_id)])
-}
-
-# Make a table with all mean scaled counts, labeled by which method they were identified with.
-
-genes <- list(Continuous_1 = plot_df_long_continuous[[1]]$name,
-              Continuous_2 = plot_df_long_continuous[[2]]$name,
-              Categorical = plot_df_long_categorical$name)
-
-intersects <- data.frame(list_to_matrix(genes)) %>%
-  mutate(method = ifelse(Continuous_1 == 1 & Categorical == 0, "Continuous",
-                ifelse(Continuous_2 == 1 & Categorical == 0, "Continuous",
-                       ifelse(Continuous_1 == 1 & Categorical == 1, "Combined",
-                              ifelse(Continuous_2 == 1 & Categorical == 1, "Combined",
-                                    ifelse(Continuous_1 == 0 & Continuous_2 == 0 & Categorical == 1, "Categorical",
-                              "try again"))))))
-
-plot_df_long_both <- rbind(plot_df_long_continuous[[1]],
-                           plot_df_long_continuous[[2]],
-                           plot_df_long_categorical) %>%
-  mutate(method = intersects$method[match(name, rownames(intersects))]) %>%
-  mutate(method = factor(method, levels = c("Categorical", "Continuous", "Combined")))
-
-colfunc <- colorRampPalette(c("#62a1db","#e7d87d", "#dd9f40","#b4451f", "#b01111"))
-
-png("./Figures/Fig1/Fig1B_heatmap.png", height = 3500, width = 3200, res = 300, units = "px")
-ggplot(data = plot_df_long_both, aes(x = Day, y = Symbol, fill = mean)) +
-geom_tile() +
-facet_grid(method~Response, scales = "free") +
-scale_fill_gradientn(colors = colfunc(100), limits = c(-1.5, 1.5), name = "Mean\nZ-Score") +
-labs(y = "Gene") +
-theme_classic() +
-theme(axis.text.y = element_text(size = 15),
-    axis.text.x = element_text(size = 15),
-    axis.title = element_text(face = "bold", size = 20),
-    strip.text = element_text(face = "bold", size = 17),
-    legend.text = element_text(size = 12),
-    legend.title = element_text(size = 15))
 dev.off()
 ```
