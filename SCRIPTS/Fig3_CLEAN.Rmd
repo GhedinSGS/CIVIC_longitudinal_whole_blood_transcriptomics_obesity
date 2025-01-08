@@ -23,14 +23,14 @@ library(purrr)
 
 # Set working directory
 ```{r, setup, include=FALSE}
-knitr::opts_knit$set(root.dir = )
+knitr::opts_knit$set()
 ```
 
 # Step 1: Import Data
 Remember to set the appropriate working directory. The .RData file here was generated using "Data Wrangling" and "Preprocessing Scripts" which
 are available.
 ```{r}
-load("./Scripts/Data/Publication/Longitudinal_complete_data.RData")
+load("./Longitudinal_complete_data.RData")
 colfunc <- colorRampPalette(c("#832424", "white", "#3A3A98"))
 ```
 
@@ -177,9 +177,15 @@ sig_fullmodel_nonobese <- res_fullmodel_nonobese %>%
 allgenes <- rbind(sig_fullmodel_obese %>% mutate(Model = "NoTime/Obese", stat = NA),
                   sig_fullmodel_nonobese %>% mutate(Model = "NoTime/Nonobese", stat = NA),
                   sig_LRT_obese %>% mutate(Model = "LRT/Obese"),
-                  sig_LRT_nonobese %>% mutate(Model = "LRT/Nonobese"))
+                  sig_LRT_nonobese %>% mutate(Model = "LRT/Nonobese")) %>% 
+   mutate(pvalue = signif(pvalue, 3),
+          stat = signif(stat, 3),
+          padj = signif(padj, 3),
+          lfcSE = signif(lfcSE, 3),
+          log2FoldChange = signif(log2FoldChange, 3),
+          baseMean = signif(baseMean, 3))
 
-write.csv(allgenes, "./Scripts/Supplement/Supplemental_Table_4.csv")
+write.csv(allgenes, "./OUTPUTS/Supplement/Supplemental_Table_4.csv", row.names = FALSE)
 ```
 
 
@@ -247,11 +253,11 @@ for(i in 1:length(plot_df_long_continuous)){
         plot.title = element_text(hjust = 0.5, size = 20, face = "bold"))
 }
 
-png("./Figures/Fig3/Fig3B_cluster1.png", height = 1250, width = 3000, res = 300, units = "px")
+png("./OUTPUTS/Fig3B_cluster1.png", height = 1250, width = 3000, res = 300, units = "px")
 plot_list_grouped[[1]]
 dev.off()
 
-pdf("./Figures/Fig3/Fig3B_cluster1.pdf")
+pdf("./OUTPUTS/Fig3B_cluster1.pdf")
 plot_list_grouped[[1]]
 dev.off()
 ```
@@ -281,7 +287,7 @@ meandata$group <- ifelse(meandata$gene %in% sig_LRT_obese$gene & meandata$gene %
 obese_genes <- meandata %>% filter(group %in% c("Obese", "Both")) %>% filter(BMI == "Obese") %>% filter(Serology %in% c("High Responder", "Non Responder"))
 nonobese_genes <- meandata %>% filter(group %in% c("Non Obese", "Both")) %>% filter(BMI == "Non Obese") %>% filter(Serology %in% c("High Responder", "Non Responder"))
 
-png("./Figures/Fig3/Fig3A_heatmap_obese.png", height = 5000, width = 3300, res = 300, units = "px")
+png("./OUTPUTS/Fig3A_heatmap_obese.png", height = 5000, width = 3300, res = 300, units = "px")
 ggplot(data = obese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
   geom_tile() + 
     scale_fill_gradient2(limits = c(-2, 2), name = "Mean\nZ-Score") +
@@ -295,7 +301,7 @@ ggplot(data = obese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
           legend.title = element_text(size = 20))
 dev.off()
 
-png("./Figures/Fig3/Fig3A_heatmap_nonobese.png", height = 5000, width = 3300, res = 300, units = "px")
+png("./OUTPUTS/Fig3A_heatmap_nonobese.png", height = 5000, width = 3300, res = 300, units = "px")
 ggplot(data = nonobese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
   geom_tile() + 
     scale_fill_gradient2(limits = c(-2, 2), name = "Mean\nZ-Score") +
@@ -309,7 +315,7 @@ ggplot(data = nonobese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
           legend.title = element_text(size = 20))
 dev.off()
 
-pdf("./Figures/Fig3/Fig3A_heatmap_obese.pdf", width = 10, height = 15)
+pdf("./OUTPUTS/Fig3A_heatmap_obese.pdf", width = 10, height = 15)
 ggplot(data = obese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
   geom_tile() + 
     scale_fill_gradient2(limits = c(-2, 2), name = "Mean\nZ-Score") +
@@ -323,7 +329,7 @@ ggplot(data = obese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
           legend.title = element_text(size = 20))
 dev.off()
 
-pdf("./Figures/Fig3/Fig3A_heatmap_nonobese.pdf", width = 10, height = 15)
+pdf("./OUTPUTS/Fig3A_heatmap_nonobese.pdf", width = 10, height = 15)
 ggplot(data = nonobese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
   geom_tile() + 
     scale_fill_gradient2(limits = c(-2, 2), name = "Mean\nZ-Score") +
@@ -388,267 +394,4 @@ for(i in 1:length(genes)){
 }
 
 tpm_plots_siggenes
-```
-
-
-# DEPRECATED
-
-
-Old 3A: Heatmap of average scaled counts
-```{r}
-allgenes <- c(sig_LRT_obese$gene, sig_LRT_nonobese$gene)
-
-ntd_categorical <- normTransform(dds_LRT_time_response)[sig_LRT$gene]
-
-allgenes_tpm_df <- t(UGA4_longitudinal_tpm_hemo_removed[rownames(UGA4_longitudinal_tpm_hemo_removed) %in% allgenes, ])
-allgenes_tpm_df <- data.frame(scale(allgenes_tpm_df, center = TRUE, scale = TRUE))
-allgenes_tpm_df$BMI <- UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(allgenes_tpm_df), rownames(UGA4_longitudinal_metadata))]
-allgenes_tpm_df$Serology <- UGA4_longitudinal_metadata$Serology[match(rownames(allgenes_tpm_df), rownames(UGA4_longitudinal_metadata))]
-allgenes_tpm_df$Day <- UGA4_longitudinal_metadata$Day[match(rownames(allgenes_tpm_df), rownames(UGA4_longitudinal_metadata))]
-allgenes_tpm_df <- pivot_longer(allgenes_tpm_df, cols = starts_with("ENSG"), names_to = "gene")
-allgenes_tpm_df$Name <- genenames$hgnc_symbol[match(allgenes_tpm_df$gene, genenames$ensembl_gene_id)]
-
-
-meandata <- allgenes_tpm_df %>% group_by(BMI, Serology, Day, gene, Name) %>% summarise(mean_expr = mean(value))
-meandata$group <- ifelse(meandata$gene %in% sig_LRT_obese$gene & meandata$gene %in% sig_LRT_nonobese$gene, "Both",
-                                ifelse(meandata$gene %in% sig_LRT_obese$gene, "Obese",
-                                       ifelse(meandata$gene %in% sig_LRT_nonobese$gene, "Non Obese", "try again")))
-
-obese_genes <- meandata %>% filter(group %in% c("Obese", "Both"))
-nonobese_genes <- meandata %>% filter(group %in% c("Non Obese", "Both"))
-
-png("./Figures/Fig3/Fig3A_heatmap_obese.png", height = 5000, width = 5000, res = 300, units = "px")
-ggplot(data = obese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
-  geom_tile() + 
-    scale_fill_gradientn(colors = gradient_pal, limits = c(-2, 2), name = "Mean\nZ-Score") +
-    facet_grid(group ~ Serology, scales = "free") +
-  theme_classic() +
-    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 18),
-          axis.text.y = element_text(size = 20),
-          axis.title = element_text(face = "bold", size = 20),
-          strip.text = element_text(size = 20, face = "bold"),
-          legend.text = element_text(size = 15),
-          legend.title = element_text(size = 20))
-dev.off()
-
-png("./Figures/Fig3/Fig3A_heatmap_nonobese.png", height = 5000, width = 5000, res = 300, units = "px")
-ggplot(data = nonobese_genes, aes(x = Day, y = Name, fill = mean_expr)) +
-  geom_tile() + 
-    scale_fill_gradientn(colors = gradient_pal, limits = c(-2, 2), name = "Mean\nZ-Score") +
-    facet_grid(group ~ Serology, scales = "free") +
-  theme_classic() +
-    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 18),
-          axis.text.y = element_text(size = 20),
-          axis.title = element_text(face = "bold", size = 20),
-          strip.text = element_text(size = 20, face = "bold"),
-          legend.text = element_text(size = 15),
-          legend.title = element_text(size = 20))
-dev.off()
-```
-
-#HEATMAP of Non-Obese DE Genes
-```{r}
-genes <- c(sig_LRT_obese$gene, sig_LRT_nonobese$gene)
-
-dds_all <- deseq_import(UGA4_longitudinal_counts_hemo_removed, UGA4_longitudinal_metadata, design_setting = time_serology_model)
-
-ntd_all <- normTransform(dds_all)[genes]
-
-all <- t(data.frame(assay(ntd_all)))
-
-annot_col <- data.frame(genes = colnames(all)) %>%
-  mutate(status = ifelse(genes %in% rownames(ntd_obese), "Both", "Nonobese Only"),
-         symbol = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)]) %>%
-  arrange(status)
-
-```
-
-
-```{r}
-#ntd_nonobese <- normTransform(dds_LRT_time_serology_nonobese)[sig_LRT_nonobese$gene]
-#ntd_obese <- normTransform(dds_LRT_time_serology_obese)[sig_LRT_obese$gene]
-
-ntd_obese <- assay(ntd_all[sig_LRT_obese$gene])[,rownames(obese_metadata)]
-ntd_nonobese <- assay(ntd_all[sig_LRT_nonobese$gene])[,rownames(nonobese_metadata)]
-
-nonobese <- t(data.frame(ntd_nonobese))
-
-annot_col <- data.frame(genes = colnames(nonobese)) %>%
-  mutate(status = ifelse(genes %in% rownames(ntd_obese), "Both", "Nonobese Only"),
-         symbol = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)]) %>%
-  arrange(status)
-
-rownames(nonobese) <- gsub("X", "", rownames(nonobese))
-colnames(nonobese) <- genenames$hgnc_symbol[match(colnames(nonobese), genenames$ensembl_gene_id)]
-
-nonobese <- data.frame(nonobese) %>%
-  mutate(BMI = UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
-         Response = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
-         Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
-  arrange(Day, BMI, Response)
-
-annot_row <- data.frame(Day = nonobese$Day,
-                    Response = nonobese$Response)
-rownames(annot_row) <- rownames(nonobese)
-
-ann_colors = list(
-  Response = c("High Responder" = "#1D6A71", "Non Responder"="#9D5557"),
-  Day = c("0" = "#bed3e5", "3" = "#a7c1e0", "7" = "#6f91c3", "28" = "#823f8a"))
-
-# use this function to make row or column names bold
-# parameters:
-#   mat: the matrix passed to pheatmap
-#   rc_fun: either rownames or colnames
-#   rc_names: vector of names that should appear in boldface
-make_bold_names <- function(mat, rc_fun, rc_names) {
-  bold_names <- rc_fun(mat)
-  ids <- rc_names %>% match(rc_fun(mat))
-  ids %>%
-    walk(
-      function(i)
-        bold_names[i] <<-
-        bquote(bold(.(rc_fun(mat)[i]))) %>%
-        as.expression()
-    )
-  bold_names
-}
-
-pheatmap(nonobese[, c(1:36)],annotation_row = annot_row, cluster_rows = FALSE, scale = "column",
-         #color = colfunc(100),
-         breaks = c(-2, 0, 2),
-         show_rownames = FALSE,
-         gaps_row = seq(0, 312, 78),
-         labels_col = make_bold_names(nonobese[, c(1:36)], colnames, c(annot_col %>% filter(status == "Both") %>% pull(symbol))),
-         annotation_colors = ann_colors,
-         heatmap_legend_param = list(title = "Scaled Expression"))
-```
-
-# HEATMAP of Obese DEGenes
-```{r}
-obese <- t(data.frame(ntd_obese))
-
-annot_col <- data.frame(genes = colnames(obese)) %>%
-  mutate(status = ifelse(genes %in% rownames(ntd_nonobese), "Both", "Obese Only"),
-         symbol = genenames$hgnc_symbol[match(genes, genenames$ensembl_gene_id)]) %>%
-  arrange(status)
-
-colnames(obese) <- genenames$hgnc_symbol[match(colnames(obese), genenames$ensembl_gene_id)]
-rownames(obese) <- gsub("X", "", rownames(obese))
-
-obese <- data.frame(obese) %>%
-  mutate(BMI = UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
-         Response = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
-         Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
-  arrange(Day, BMI, Response)
-
-annot <- data.frame(Day = obese$Day,
-                    Response = obese$Response)
-rownames(annot) <- rownames(obese)
-
-ann_colors = list(
-  Response = c("High Responder" = "#1D6A71", "Non Responder"="#9D5557"),
-  Day = c("0" = "#bed3e5", "3" = "#a7c1e0", "7" = "#6f91c3", "28" = "#823f8a"))
-
-pheatmap(obese[, c(1:22)],annotation_row = annot, cluster_rows = FALSE, scale = "column",
-         #color = colfunc(100),
-         breaks = c(-2, 0, 2),
-         show_rownames = FALSE,
-         gaps_row = seq(0, 180, 46),
-         labels_col = make_bold_names(obese[, c(1:22)], colnames, c(annot_col %>% filter(status == "Both") %>% pull(symbol))),
-         annotation_colors = ann_colors,
-         heatmap_legend_param = list(title = "Scaled Expression"))
-```
-
-```{r}
-nrow(UGA4_longitudinal_metadata %>% filter(Day == 0) %>% filter(Serology == "Non Responder"))
-```
-
-
-# Alternative to Fig3B - Heatmaps
-```{r}
-all_cluster_genes <- c(all_clusters_time_response_continuous[[1]]$genes) #all_clusters_time_response_continuous[[2]]$genes, all_clusters_time_response_continuous[[3]]$genes)
-
-ntd_obese <- assay(normTransform(dds_fullmodel_time_serology_obese)[all_cluster_genes])
-ntd_nonobese <- assay(normTransform(dds_fullmodel_time_serology_nonobese)[all_cluster_genes])
-
-all_normalized_clustergenes <- data.frame(t(cbind(ntd_obese, ntd_nonobese))) 
-
-all_normalized_clustergenes <- all_normalized_clustergenes %>%  mutate(Response = UGA4_longitudinal_metadata$Serology[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
-         Day = UGA4_longitudinal_metadata$Day[match(rownames(.), rownames(UGA4_longitudinal_metadata))],
-         BMI = UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(.), rownames(UGA4_longitudinal_metadata))]) %>%
-  arrange(Response, Day)
-
-  
-  
-all_normalized_clustergenes_obese <- all_normalized_clustergenes %>% filter(BMI == "Obese")
-all_normalized_clustergenes_nonobese <- all_normalized_clustergenes %>% filter(BMI == "Non Obese")
-
-colnames(all_normalized_clustergenes_nonobese) <- genenames$hgnc_symbol[match(colnames(all_normalized_clustergenes_nonobese), genenames$ensembl_gene_id)]
-colnames(all_normalized_clustergenes_obese) <- genenames$hgnc_symbol[match(colnames(all_normalized_clustergenes_obese), genenames$ensembl_gene_id)]
-
-annot_obese <- data.frame(Day = all_normalized_clustergenes_obese$Day,
-                    Response = all_normalized_clustergenes_obese$Response)
-rownames(annot_obese) <- rownames(all_normalized_clustergenes_obese)
-
-annot_nonobese <- data.frame(Day = all_normalized_clustergenes_nonobese$Day,
-                    Response = all_normalized_clustergenes_nonobese$Response)
-rownames(annot_nonobese) <- rownames(all_normalized_clustergenes_nonobese)
-
-ann_colors = list(
-  Response = c("High Responder" = "#1D6A71", "Non Responder"="#9D5557"),
-  Day = c("0" = "#bed3e5", "3" = "#a7c1e0", "7" = "#6f91c3", "28" = "#823f8a"))
-
-
-
-png(file = "./Figures/Fig3/Fig3_obese_heatmap.png", height = 1500, width = 3000, res = 300, units = "px")
-pheatmap(all_normalized_clustergenes_obese[, c(1:30)],
-         annotation_row = annot_obese, 
-         cluster_rows = FALSE, 
-         scale = "column",
-         color = colfunc(100),
-         breaks = c(-3, 0, 3),
-         show_rownames = FALSE,
-         gaps_row = 72,
-         annotation_colors = ann_colors,
-         heatmap_legend_param = list(title = "Scaled Expression"))
-dev.off()
-
-png(file = "./Figures/Fig3/Fig3_nonobese_heatmap.png", height = 1500, width = 3000, res = 300, units = "px")
-pheatmap(all_normalized_clustergenes_nonobese[, c(1:30)],
-         annotation_row = annot_nonobese, 
-         cluster_rows = FALSE, 
-         scale = "column",
-         color = colfunc(100),
-         breaks = c(-3, 0, 3),
-         show_rownames = FALSE,
-         gaps_row = 164,
-         annotation_colors = ann_colors,
-         heatmap_legend_param = list(title = "Scaled Expression"))
-dev.off()
-
-pdf(file = "./Figures/Fig3/Fig3_obese_heatmap.pdf")
-pheatmap(all_normalized_clustergenes_obese[, c(1:30)],
-         annotation_row = annot_obese, 
-         cluster_rows = FALSE, 
-         scale = "column",
-         color = colfunc(100),
-         breaks = c(-3, 0, 3),
-         show_rownames = FALSE,
-         gaps_row = 72,
-         annotation_colors = ann_colors,
-         heatmap_legend_param = list(title = "Scaled Expression"))
-dev.off()
-
-pdf(file = "./Figures/Fig3/Fig3_nonobese_heatmap.pdf")
-pheatmap(all_normalized_clustergenes_nonobese[, c(1:30)],
-         annotation_row = annot_nonobese, 
-         cluster_rows = FALSE, 
-         scale = "column",
-         color = colfunc(100),
-         breaks = c(-3, 0, 3),
-         show_rownames = FALSE,
-         gaps_row = 164,
-         annotation_colors = ann_colors,
-         heatmap_legend_param = list(title = "Scaled Expression"))
-dev.off()
 ```

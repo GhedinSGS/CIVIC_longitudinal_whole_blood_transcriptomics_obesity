@@ -17,7 +17,6 @@ library(cowplot)
 library(tidyr)
 library(ComplexHeatmap)
 library(paletteer)
-
 library(ggpmisc)
 library(NatParksPalettes)
 library(enrichplot)
@@ -26,13 +25,13 @@ library(edgeR)
 ```
 
 ```{r, setup, include=FALSE}
-knitr::opts_knit$set(root.dir = )
+knitr::opts_knit$set()
 ```
 
 # Step 1: Import Data
 Remember to set the appropriate working directory. The .RData file here was generated using "Data Wrangling" and "Preprocessing Scripts"
 ```{r}
-load("./Scripts/Data/Publication/Longitudinal_complete_data.RData")
+load("./Longitudinal_complete_data.RData")
 colfunc <- colorRampPalette(c("#62a1db","#e7d87d", "#dd9f40","#b4451f", "#b01111"))
 ```
 
@@ -314,9 +313,14 @@ allgenes <- rbind(sig_d0_nonobese %>% mutate(Day = 0, BMI = "Nonobese"),
                   sig_d7_nonobese %>% mutate(Day = 7, BMI = "Nonobese"),
                   sig_d7_obese %>% mutate(Day = 7, BMI = "Obese"),
                   sig_d28_nonobese %>% mutate(Day = 28, BMI = "Nonobese"),
-                  sig_d28_obese %>% mutate(Day = 28, BMI = "Obese"))
+                  sig_d28_obese %>% mutate(Day = 28, BMI = "Obese")) %>% 
+   mutate(pvalue = signif(pvalue, 3),
+          padj = signif(padj, 3),
+          lfcSE = signif(lfcSE, 3),
+          log2FoldChange = signif(log2FoldChange, 3),
+          baseMean = signif(baseMean, 3))
 
-write.csv(allgenes, "./Scripts/Supplement/Supplemental_Table_5.csv")
+write.csv(allgenes, "./OUTPUTS/Supplement/Supplemental_Table_5.csv")
 ```
 
 # Prep Data for Enrichment Analysis
@@ -574,7 +578,7 @@ sig_sets <- rbind(all_go,
 
 sets_to_plot <- c("GO:0002218", "GO:0030036", "GO:0002250", "GO:0050851", "GO:0019221", "GO:0002377", "GO:0002758", "GO:0032635", "GO:0002449", "GO:0000165", "GO:0030099", "R-HSA-6798695", "GO:0002221", "R-HSA-76002", "GO:0045089", "R-HSA-168898", "R-HSA-202430")
 
-png("./Figures/Fig4/Fig4A_Enrichment.png", height = 1500, width = 2000, res = 300, units = "px")
+png("./OUTPUTS/Fig4A_Enrichment.png", height = 1500, width = 2000, res = 300, units = "px")
 ggplot(data = sig_sets %>% filter(ID %in% sets_to_plot), aes(x = factor(Day), y = Description, fill = NES)) +
   geom_tile() +
   geom_text(aes(label = Signif)) +
@@ -584,7 +588,7 @@ ggplot(data = sig_sets %>% filter(ID %in% sets_to_plot), aes(x = factor(Day), y 
   theme_classic()
 dev.off()
 
-pdf("./Figures/Fig4/Fig4A_Enrichment.pdf")
+pdf("./OUTPUTS/Fig4A_Enrichment.pdf")
 ggplot(data = sig_sets %>% filter(ID %in% sets_to_plot), aes(x = factor(Day), y = Description, fill = NES)) +
   geom_tile() +
   geom_text(aes(label = Signif)) +
@@ -597,9 +601,17 @@ dev.off()
 # Export significant gene sets for supplement
 ```{r}
 all_sets <- rbind(all_go,
-                  all_reactome %>% mutate(ONTOLOGY = NA))
+                  all_reactome %>% mutate(ONTOLOGY = NA)) %>%
+  filter(p.adjust <= 0.05)  %>% 
+   mutate(enrichmentScore = signif(enrichmentScore, 3),
+          NES = signif(NES, 3),
+          pvalue = signif(pvalue, 3),
+          p.adjust = signif(p.adjust, 3),
+          qvalue = signif(qvalue, 3))
 
-write.csv(all_sets, "./Scripts/Supplement/Supplemental_Table_6.csv")
+
+
+write.csv(all_sets, "./OUTPUTS/Supplement/Supplemental_Table_6.csv", row.names = FALSE)
 ```
 
 # Plot individual gene profiles
@@ -665,144 +677,32 @@ for(i in 1:length(genes_for_fig)){
 gene_fig_names <- genenames$hgnc_symbol[match(genes_for_fig, genenames$ensembl_gene_id)]
 
 for(i in 1:length(figure_tpm_plots_categorical)){
-  png(filename = paste0("./Figures/Fig4/",gene_fig_names[[i]], "_tpm_categorical.png"), height = 1400, width = 4000, res = 300, units = "px")
+  png(filename = paste0("./OUTPUTS/",gene_fig_names[[i]], "_tpm_categorical.png"), height = 1400, width = 4000, res = 300, units = "px")
   print(figure_tpm_plots_categorical[[i]])
   dev.off()
 }
 
 for(i in 1:length(figure_tpm_plots_categorical)){
-  pdf(filename = paste0("./Figures/Fig4/",gene_fig_names[[i]], "_tpm_categorical.pdf"))
+  pdf(filename = paste0("./OUTPUTS/",gene_fig_names[[i]], "_tpm_categorical.pdf"))
   figure_tpm_plots_categorical[[i]]
   dev.off()
 }
 
-pdf("./Figures/Fig4/Fig4A_ZAP70_TPM_categorical.pdf", height = 5, width = 12)
+pdf("./OUTPUTS/Fig4A_ZAP70_TPM_categorical.pdf", height = 5, width = 12)
 figure_tpm_plots_categorical[[7]]
 dev.off()
 
-pdf("./Figures/Fig4/Fig4A_TLR8_TPM_categorical.pdf", height = 5, width = 12)
+pdf("./OUTPUTS/Fig4A_TLR8_TPM_categorical.pdf", height = 5, width = 12)
 figure_tpm_plots_categorical[[10]]
 dev.off()
 
-pdf("./Figures/Fig4/Fig4A_LAT_TPM_categorical.pdf", height = 5, width = 12)
+pdf("./OUTPUTS/Fig4A_LAT_TPM_categorical.pdf", height = 5, width = 12)
 figure_tpm_plots_categorical[[8]]
 dev.off()
 
 for(i in 1:length(figure_tpm_plots)){
-  png(filename = paste0("./Figures/Fig4/",gene_fig_names[[i]], "_tpm.png"), height = 1400, width = 4000, res = 300, units = "px")
+  png(filename = paste0("./OUTPUTS/",gene_fig_names[[i]], "_tpm.png"), height = 1400, width = 4000, res = 300, units = "px")
   print(figure_tpm_plots_categorical[[i]])
   dev.off()
 }
-```
-
-
-###DEPRECATED AS OF 07JUN2024
-```{r}
-reactome <- c("R-HSA-6798695")
-go <- c("GO:0002250", "GO:0045061")
-
-reactome_selected <- all_reactome %>%
-  filter(ID %in% reactome) %>%
-  mutate(signif = ifelse(p.adjust < 0.05, "Significant", "Non-Significant")) %>%
-  mutate(method = "Reactome")
-
-go_selected <- all_go %>%
-  filter(ID %in% go) %>%
-  mutate(signif = ifelse(p.adjust < 0.05, "Significant", "Non-Significant")) %>%
-  mutate(method = "Reactome")
-
-
-
-all_pathways <- rbind(reactome_selected, go_selected[,-1]) %>%
-  mutate(BMI_Signif = paste0(.$BMI, ", ", .$signif))
-
-png("./Figures/Fig4/Fig4A_Enrichment.png", height = 3200, width = 2200, res = 300, units = "px")
-ggplot(data = all_pathways, aes(x = as.factor(Day), y = NES, group = BMI)) +
-  geom_line() +
-  geom_point(size = 5, aes(shape = BMI_Signif, color = ifelse(signif == "Significant", as.numeric(p.adjust), NA))) +
- # geom_text(aes(label = ifelse(signif == "Significant", "*", "")), 
- #           position = position_dodge(width = .9), vjust = -.1, size = 20 / .pt) +
-  scale_color_gradientn(colors = c("#0a3a2a", "#92ddc8"), name = "Adjusted\nP Value") +
-  scale_shape_manual(values = c(2, 17, 1, 16), name = "BMI Category") +
-  labs(x = "Day", y = "Normalized Enrichment Score") +
-  facet_wrap(~Description, strip.position = "top", nrow = 5) +
-  ylim(c(-4, 4)) +
-  theme_bw() +
-  theme(strip.background = element_blank(),
-        strip.text = element_text(size = 15),
-        axis.text = element_text(size = 15),
-        axis.title = element_text(size = 20),
-        legend.text = element_text(size = 15),
-        legend.title = element_text(size = 18))
-dev.off() 
-```
-
-# Genes for the Figure
-```{r}
-genes_for_fig <- c("ENSG00000163563", "ENSG00000116701", "ENSG00000182866", "ENSG00000126353", "ENSG00000139193", "ENSG00000137078", "ENSG00000115085", "ENSG00000213658")
-
-figure_tpm_plots <- list()
-
-for(i in 1:length(genes_for_fig)){
-        plot_df <- data.frame(t(UGA4_longitudinal_tpm_hemo_removed[rownames(UGA4_longitudinal_tpm_hemo_removed) %in% genes_for_fig[[i]], ]))
-        colnames(plot_df) <- genes_for_fig[[i]]
-        plot_df$Serology <- log2(UGA4_longitudinal_metadata$vax_strain_seroconversion[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))])
-        plot_df$BMI <- UGA4_longitudinal_metadata$BMI_Bivariate[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
-                plot_df$Day <- UGA4_longitudinal_metadata$Day[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
-        plot_df$ID <- UGA4_longitudinal_metadata$ID[match(rownames(plot_df), rownames(UGA4_longitudinal_metadata))]
-        
-        #plot_df <- plot_df %>% filter(Serology %in% c("High Responder", "Non Responder"))
-    
-      figure_tpm_plots[[i]] <- ggplot(data = plot_df, aes(x = !!plot_df[,2], y = !!plot_df[,1], color = !!plot_df[,3], group = !!plot_df[,3])) +
-            geom_point(position = position_jitterdodge()) +
-        #geom_boxplot() +
-         geom_smooth(method = "lm") +
-         scale_color_manual(values = c("#638475", "#735D78"), name = "BMI") +
-            #scale_color_paletteer_d("nationalparkcolors::SmokyMountains", name = "BMI") +
-            labs(title = genenames$hgnc_symbol[match(colnames(plot_df)[[1]], genenames$ensembl_gene_id)], x = "log2(Seroconversion)", y = "TPM") +
-          scale_y_log10() +
-            theme_bw() +
-          facet_grid(.~Day) +
-        theme(axis.text.y = element_text(size = 15),
-    axis.text.x = element_text(size = 15),
-    axis.title = element_text(size = 20),
-    strip.text = element_text(size = 17),
-    legend.text = element_text(size = 12),
-    legend.title = element_text(size = 15),
-    title = element_text(size = 15),
-    aspect.ratio = 1,
-    strip.background = element_blank())
-}
-
-png("./Figures/Fig4/mnda_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
-figure_tpm_plots[[1]]
-dev.off()
-
-png("./Figures/Fig4/ncf2_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
-figure_tpm_plots[[2]]
-dev.off()
-
-png("./Figures/Fig4/lck_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
-figure_tpm_plots[[3]]
-dev.off()
-
-png("./Figures/Fig4/ccr7_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
-figure_tpm_plots[[4]]
-dev.off()
-
-png("./Figures/Fig4/cd27_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
-figure_tpm_plots[[5]]
-dev.off()
-
-png("./Figures/Fig4/sit1_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
-figure_tpm_plots[[6]]
-dev.off()
-
-png("./Figures/Fig4/zap70_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
-figure_tpm_plots[[7]]
-dev.off()
-
-png("./Figures/Fig4/lat_tpm.png", height = 1250, width = 4000, res = 300, units = "px")
-figure_tpm_plots[[8]]
-dev.off()
 ```
